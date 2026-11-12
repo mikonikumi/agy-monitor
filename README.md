@@ -18,13 +18,13 @@
 macOS / Linux / WSL：
 
 ```bash
-git clone https://github.com/sisyyyyphus/agy-monitor.git ~/.gemini/config/plugins/agy-monitor
+git clone https://github.com/mikonikumi/agy-monitor.git ~/.gemini/config/plugins/agy-monitor
 ```
 
 Windows (PowerShell)：
 
 ```powershell
-git clone https://github.com/sisyyyyphus/agy-monitor.git "$env:USERPROFILE\.gemini\config\plugins\agy-monitor"
+git clone https://github.com/mikonikumi/agy-monitor.git "$env:USERPROFILE\.gemini\config\plugins\agy-monitor"
 ```
 
 如果 WSL / Linux 下是用 `nvm` 或 `fnm` 装的 Node 导致面板起不来，做个软链让系统路径能找到 `node` 就行：
