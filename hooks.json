@@ -1,0 +1,25 @@
+{
+  "agy-monitor": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./hooks/hook_runner.mjs SessionStart",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./hooks/hook_runner.mjs PreInvocation",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./hooks/hook_runner.mjs Stop",
+        "timeout": 5
+      }
+    ]
+  }
+}

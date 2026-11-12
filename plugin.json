@@ -1,0 +1,7 @@
+{
+  "name": "agy-monitor",
+  "displayName": "agy-monitor",
+  "description": "Google Antigravity 实时 256K 上下文精确归因、零 Token 自动压缩预警与跨端（WSL + Windows）全局 Token 用量总控插件。",
+  "version": "0.1.0",
+  "logo": "assets/logo.svg"
+}

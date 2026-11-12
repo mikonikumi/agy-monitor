@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>agy-monitor · 上下文与全局 Token 监控</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    (function () {
+      function showBootDiagnostic(reason) {
+        if (window.__AGY_MONITOR_BOOTED__) return;
+        var sync = document.getElementById('sync-status');
+        var lbl = document.getElementById('sync-label');
+        if (sync) sync.setAttribute('data-state', 'error');
+        if (lbl) lbl.textContent = '加载异常';
+        var banners = [
+          document.getElementById('conv-error-banner'),
+          document.getElementById('global-error-banner')
+        ];
+        for (var i = 0; i < banners.length; i++) {
+          var b = banners[i];
+          if (!b) continue;
+          b.hidden = false;
+          b.textContent = '';
+          var span = document.createElement('span');
+          span.textContent = '前端脚本启动受阻（' + reason + '）。 ';
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'ghost-btn sm';
+          btn.textContent = '重新加载';
+          btn.onclick = function () { window.location.reload(); };
+          b.appendChild(span);
+          b.appendChild(btn);
+        }
+      }
+      window.addEventListener('error', function (e) {
+        if (window.__AGY_MONITOR_BOOTED__) return;
+        var t = e && e.target;
+        if (t && t.tagName === 'SCRIPT') {
+          showBootDiagnostic('脚本资源加载失败: ' + (t.getAttribute('src') || 'unknown'));
+        } else if (e && e.message) {
+          showBootDiagnostic(e.message);
+        }
+      }, true);
+      window.setTimeout(function () {
+        if (!window.__AGY_MONITOR_BOOTED__) {
+          showBootDiagnostic('8 秒内未完成初始化，请检查 Sidecar 网关鉴权或服务状态');
+        }
+      }, 8000);
+    })();
+  </script>
+  <script src="/app-classic.js" defer></script>
+</head>
+<body>
+  <div id="app-shell" class="app-shell" data-testid="agy-monitor-shell">
+    <header class="shell-header">
+      <div class="brand-bar">
+        <div class="brand-identity">
+          <svg class="brand-logo" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="2.5" y="3" width="19" height="18" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M6.5 15.5 10 11l3 3 4.5-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="17.5" cy="8" r="1.6" fill="currentColor"/>
+          </svg>
+          <h1 class="brand-title">agy-monitor</h1>
+          <span id="mode-badge" class="pill pill-subtle" hidden>预览模式</span>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="sync-status" class="sync-indicator" title="点击立即同步并查看实时状态">
+            <span class="sync-dot" aria-hidden="true"></span>
+            <span id="sync-label">实时</span>
+          </button>
+          <button type="button" id="btn-refresh" class="icon-btn" title="立即刷新数据" aria-label="立即刷新数据">
+            <svg class="icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.65M13.5 2.5v2.6h-2.6"/>
+            </svg>
+          </button>
+          <button type="button" id="btn-fullscreen-header" class="ghost-btn sm" data-action="open-fullscreen" title="在浏览器打开全屏总控大屏">
+            <svg class="icon" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M6.5 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9.5"/>
+              <path d="M9.5 3h3.5v3.5M13 3 7.5 8.5"/>
+            </svg>
+            <span>大屏展开</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="fullscreen-url-bar" class="fullscreen-url-bar" hidden>
+        <span class="fullscreen-url-label">全屏总控地址</span>
+        <input type="text" id="fullscreen-url-input" class="fullscreen-url-input" readonly aria-label="全屏总控链接">
+        <button type="button" id="btn-copy-fullscreen-url" class="ghost-btn sm">复制链接</button>
+        <a id="link-open-fullscreen" href="#" target="_blank" rel="noreferrer" class="primary-outline-btn sm">新窗口打开</a>
+        <button type="button" id="btn-close-fullscreen-bar" class="icon-btn" aria-label="收起">✕</button>
+      </div>
+
+      <div class="primary-tablist" role="tablist" focusgroup="tablist nomemory" aria-label="监控主视图切换">
+        <button type="button" role="tab" id="tabbtn-conversation" class="primary-tab" data-tab="conversation" aria-selected="true" focusgroupstart>
+          <span>当前对话</span>
+          <span id="tab-conv-pct" class="tab-pill" hidden>0%</span>
+        </button>
+        <button type="button" role="tab" id="tabbtn-global" class="primary-tab" data-tab="global" aria-selected="false">
+          <span>全局总控</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="shell-main">
+      <!-- ==================== TAB 1: 当前对话 ==================== -->
+      <div id="panel-conversation" role="tabpanel" aria-labelledby="tabbtn-conversation">
+        <div class="panel-inner">
+          <div id="conv-error-banner" class="inline-banner banner-error" hidden></div>
+
+          <!-- Subagent / Swarm Worker Drilldown Breadcrumb & Sibling Switcher -->
+          <nav id="conv-drilldown-bar" class="card drilldown-bar" aria-label="子智能体下钻导航" hidden>
+            <div class="drilldown-top-row">
+              <div class="drilldown-nav-left">
+                <button type="button" id="btn-back-root-conv" class="drilldown-back-btn">
+                  ← 返回主会话
+                </button>
+                <span id="conv-ancestor-trail" class="drilldown-ancestors" hidden></span>
+                <span id="conv-current-worker-badge" class="pill pill-role drilldown-worker-badge">
+                  正在查看子智能体: @subagent
+                </span>
+              </div>
+              <button
+                type="button"
+                id="btn-open-subagent-host"
+                class="ghost-btn sm drilldown-host-btn"
+                title="在当前客户端宿主窗口直接打开该子智能体会话"
+                hidden
+              >
+                在宿主打开对话 ↗
+              </button>
+            </div>
+            <div
+              id="conv-sibling-pills"
+              class="drilldown-sibling-pills"
+              role="group"
+              aria-label="同组会话与子智能体快捷切换"
+            ></div>
+          </nav>
+
+          <!-- Session Metadata Header -->
+          <section class="card session-meta-card" aria-label="当前会话信息">
+            <div class="session-title-row">
+              <div class="session-title-wrap">
+                <span id="conv-surface-badge" class="pill pill-accent">Desktop (WSL)</span>
+                <h2 id="conv-title" class="session-title">加载当前会话中…</h2>
+              </div>
+              <span id="conv-alert-pill" class="pill pill-ok">水位正常</span>
+            </div>
+            <div class="session-sub-row">
+              <span class="meta-item" title="当前生效模型">
+                <span class="meta-key">模型</span>
+                <code id="conv-model-name">—</code>
+              </span>
+              <span class="meta-sep" aria-hidden="true">·</span>
+              <span class="meta-item meta-truncate" id="conv-workspace-wrap" title="">
+                <span class="meta-key">工作区</span>
+                <span id="conv-workspace">—</span>
+              </span>
+              <div id="conv-switcher-wrap" class="conv-switcher-wrap" hidden>
+                <label for="conv-selector" class="sr-only">切换查看会话</label>
+                <select id="conv-selector" class="compact-select" title="切换会话"></select>
+              </div>
+            </div>
+          </section>
+
+          <!-- Total Consumption Card (Main + Subagents / Swarm) -->
+          <section class="card consumption-card" aria-label="本对话总消耗归集">
+            <div class="card-head">
+              <span class="card-label">本对话含缓存总消耗（主会话 + 子智能体）</span>
+              <span id="conv-subagent-count-pill" class="pill pill-subtle">无子智能体</span>
+            </div>
+            <div class="hero-number-row">
+              <strong id="conv-combined-tokens" class="hero-number" title="">0</strong>
+              <span id="conv-combined-zh" class="hero-sub">0 tokens</span>
+            </div>
+
+            <div class="split-bar" id="conv-split-bar" role="img" aria-label="主会话与子智能体消耗占比">
+              <div id="conv-split-self" class="split-seg split-self" style="width: 100%"></div>
+              <div id="conv-split-sub" class="split-seg split-sub" style="width: 0%"></div>
+            </div>
+            <div class="split-legend">
+              <div class="split-item">
+                <span class="swatch swatch-self" aria-hidden="true"></span>
+                <span class="split-name">主会话</span>
+                <strong id="conv-self-tokens">0</strong>
+                <span id="conv-self-pct" class="muted-num">(100%)</span>
+              </div>
+              <div class="split-item">
+                <span class="swatch swatch-sub" aria-hidden="true"></span>
+                <span class="split-name">派生子智能体 / Swarm</span>
+                <strong id="conv-sub-tokens">0</strong>
+                <span id="conv-sub-pct" class="muted-num">(0%)</span>
+              </div>
+            </div>
+
+            <div id="conv-subagents-list" class="subagents-list" hidden></div>
+          </section>
+
+          <!-- Throughput, Cache, Speed, Step Duration, Checkpoints -->
+          <section class="stats-grid-6" aria-label="吞吐与流速详情">
+            <div class="stat-tile">
+              <span class="stat-label">累计新增输入</span>
+              <strong id="stat-input-tokens" class="stat-value">0</strong>
+              <span id="stat-input-exact" class="stat-sub">input_tokens</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">累计输出</span>
+              <strong id="stat-output-tokens" class="stat-value">0</strong>
+              <span id="stat-output-exact" class="stat-sub">output_tokens</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">缓存命中量 / 命中率</span>
+              <div class="stat-inline">
+                <strong id="stat-cache-tokens" class="stat-value">0</strong>
+                <span id="stat-cache-rate" class="pill pill-cache">0.0%</span>
+              </div>
+              <span class="stat-sub">cache_read_tokens</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">平均输出流速</span>
+              <strong id="stat-avg-speed" class="stat-value">0.0 tok/s</strong>
+              <span class="stat-sub">output / 单步耗时</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">单步推理耗时</span>
+              <strong id="stat-avg-duration" class="stat-value">0.0s</strong>
+              <span id="stat-last-duration" class="stat-sub">最近一步: —</span>
+            </div>
+            <div class="stat-tile" id="stat-checkpoint-tile">
+              <span class="stat-label">CHECKPOINT 自动压缩</span>
+              <div class="stat-inline">
+                <strong id="stat-checkpoint-count" class="stat-value">0 次</strong>
+                <span id="stat-checkpoint-badge" class="pill pill-warn" hidden>已压缩</span>
+              </div>
+              <span id="stat-checkpoint-delta" class="stat-sub">当前尚未触发自动压缩</span>
+            </div>
+          </section>
+
+          <!-- 256K Anchored Context Window Breakdown -->
+          <section class="card context-window-card" id="context-window-card" aria-label="256K 上下文窗口拆解">
+            <div class="card-head window-head">
+              <div class="window-title-group">
+                <span class="card-label" id="context-window-label">上下文窗口构成（仅主会话 · 锚定 256K）</span>
+                <div class="methodology-wrap">
+                  <button type="button" id="btn-methodology" class="info-chip" aria-expanded="false" aria-controls="methodology-note">
+                    口径说明 ?
+                  </button>
+                </div>
+              </div>
+              <div class="window-readout">
+                <strong id="window-used-pct" class="window-pct">已使用 0.0%</strong>
+                <span id="window-used-fraction" class="window-fraction">0 / 256k</span>
+              </div>
+            </div>
+
+            <div id="methodology-note" class="methodology-note" hidden>
+              <strong>底座锁死 + Step Delta 守恒归因：</strong>
+              总占用 100% 锚定当前压缩周期最新模型步骤的官方 <code>input + cache_read + output</code>（绝不混入子智能体窗口）。固定分母为 <code>256,000</code> Token，其中右侧 <code>250K–256K</code> 为实测自动压缩触发警戒带（<code>Autocompact buffer ~6K</code>）。静态底座四子项与单步并行工具切分采用字符权重（CJK 0.65 / ASCII 0.25）守恒分摊，六大分类之和恒等于真实上下文总量。
+            </div>
+
+            <!-- Multi-color 256K segmented progress bar -->
+            <div class="context-bar-outer">
+              <div id="context-progress-bar" class="context-progress-bar" role="img" aria-label="256K 上下文分段占用条"></div>
+              <div class="context-threshold-marks" aria-hidden="true">
+                <span class="threshold-mark mark-80" style="left: 80%" title="80% 预警线 (204.8k)">80%</span>
+                <span class="threshold-mark mark-92" style="left: 92%" title="92% 临近压缩高危线 (235.5k)">92%</span>
+              </div>
+            </div>
+
+            <!-- 6 Active Categories + Buffer & Free Space -->
+            <ul id="context-categories-list" class="category-list" aria-label="六大活跃上下文分类"></ul>
+
+            <div class="buffer-free-strip" id="buffer-free-strip">
+              <div class="bf-item">
+                <span class="swatch swatch-buffer" aria-hidden="true"></span>
+                <span>Autocompact buffer 警戒带</span>
+                <strong id="window-buffer-tokens">~6.0k (2.3%)</strong>
+              </div>
+              <div class="bf-item">
+                <span class="swatch swatch-free" aria-hidden="true"></span>
+                <span>安全剩余空间 (Free space)</span>
+                <strong id="window-free-tokens">250.0k</strong>
+              </div>
+            </div>
+
+            <hr class="section-divider">
+
+            <!-- Gray Deferred Section (Lazy MCP & Inactive Skills) -->
+            <div class="deferred-section" id="deferred-section" aria-label="按需未加载估算项">
+              <div class="deferred-header">
+                <span class="deferred-title">按需未加载项（Deferred · 暂不占用当前窗口）</span>
+                <span id="deferred-total-tokens" class="deferred-total">约 0</span>
+              </div>
+              <div class="deferred-grid">
+                <div class="deferred-item">
+                  <span>Lazy MCP 工具定义</span>
+                  <span id="deferred-lazy-mcp" class="deferred-val">0</span>
+                </div>
+                <div class="deferred-item">
+                  <span>未激活 Skills 正文</span>
+                  <span id="deferred-inactive-skills" class="deferred-val">0</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Real-time Chat Compaction Alert & Inline Chat Shortcut Pill Toggles -->
+          <section class="card alert-toggle-card" id="alert-toggle-card" aria-label="聊天流零 Token 状态胶囊与压缩预警设置">
+            <div class="setting-control-row">
+              <div class="setting-copy">
+                <label for="chat-statusbar-switch" class="setting-title">聊天框上方对话状态条与快捷入口（零 Token 注入 · 免点 Extensions）</label>
+                <p class="setting-desc">
+                  开启后，在会话启动（<code>SessionStart</code>）与每次发送提问前（<code>PreInvocation</code>），直接在聊天流注入轮次、流速、缓存率与 <code>◔ X%</code> 快捷胶囊，点击即可一键唤起 <code>agy-monitor</code> 面板而无需打开 Extensions。
+                </p>
+              </div>
+              <div class="switch-wrap">
+                <input id="chat-statusbar-switch" type="checkbox" switch checked aria-describedby="alert-save-feedback">
+              </div>
+            </div>
+
+            <hr class="section-divider">
+
+            <div class="setting-control-row">
+              <div class="setting-copy">
+                <label for="chat-alert-switch" class="setting-title">聊天内压缩预警（零 Token 注入）</label>
+                <p class="setting-desc">
+                  开启后，当单会话上下文首次突破 <code>80% (204.8k)</code> 或 <code>92% (235.5k)</code> 时，在下一轮提问前向聊天流顶部注入仅用户可见的预警条与快捷跳转链接。
+                </p>
+              </div>
+              <div class="switch-wrap">
+                <input id="chat-alert-switch" type="checkbox" switch checked aria-describedby="alert-save-feedback">
+              </div>
+            </div>
+            <div id="alert-save-feedback" class="setting-feedback" aria-live="polite"></div>
+          </section>
+
+          <!-- 4 Collapsible Accordion Drawers -->
+          <section class="drawers-section" aria-label="上下文配置与单步暴涨明细">
+            <details id="drawer-rules" class="drawer">
+              <summary>
+                <span class="drawer-name">Rules 规则文件</span>
+                <span id="drawer-rules-meta" class="drawer-meta">0 项</span>
+              </summary>
+              <div id="drawer-rules-body" class="drawer-body"></div>
+            </details>
+
+            <details id="drawer-mcp" class="drawer">
+              <summary>
+                <span class="drawer-name">MCP 工具</span>
+                <span id="drawer-mcp-meta" class="drawer-meta">0 项</span>
+              </summary>
+              <div id="drawer-mcp-body" class="drawer-body"></div>
+            </details>
+
+            <details id="drawer-skills" class="drawer">
+              <summary>
+                <span class="drawer-name">Skills 技能</span>
+                <span id="drawer-skills-meta" class="drawer-meta">0 项</span>
+              </summary>
+              <div id="drawer-skills-body" class="drawer-body"></div>
+            </details>
+
+            <details id="drawer-spikes" class="drawer">
+              <summary>
+                <span class="drawer-name">单步暴涨 Top 明细</span>
+                <span id="drawer-spikes-meta" class="drawer-meta">0 步</span>
+              </summary>
+              <div id="drawer-spikes-body" class="drawer-body"></div>
+            </details>
+          </section>
+        </div>
+      </div>
+
+      <!-- ==================== TAB 2: 全局总控 ==================== -->
+      <div id="panel-global" role="tabpanel" aria-labelledby="tabbtn-global" hidden>
+        <div class="panel-inner">
+          <div id="global-error-banner" class="inline-banner banner-error" hidden></div>
+
+          <div class="global-top-bar">
+            <div class="global-top-copy">
+              <span class="global-subtitle">跨端全量账本 · 自动聚合 WSL 与 Windows 下 Desktop / IDE / CLI</span>
+            </div>
+            <button type="button" id="btn-fullscreen-global" class="primary-outline-btn" data-action="open-fullscreen">
+              <svg class="icon" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M6.5 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9.5"/>
+                <path d="M9.5 3h3.5v3.5M13 3 7.5 8.5"/>
+              </svg>
+              <span>大屏展开</span>
+            </button>
+          </div>
+
+          <!-- 5 Core Metric Cards -->
+          <section class="metrics-grid-5" id="global-metrics-grid" aria-label="全局五大核心指标">
+            <div class="card metric-card" id="card-total-tokens" title="">
+              <span class="metric-label">累计 Token 数</span>
+              <strong id="metric-total-tokens" class="metric-value">0</strong>
+              <span id="metric-total-tokens-sub" class="metric-sub">含缓存总吞吐</span>
+            </div>
+            <div class="card metric-card" id="card-peak-daily" title="">
+              <span class="metric-label">Token 使用峰值</span>
+              <strong id="metric-peak-daily" class="metric-value">0</strong>
+              <span id="metric-peak-date" class="metric-sub">单日最高吞吐</span>
+            </div>
+            <div class="card metric-card" id="card-longest-task" title="">
+              <span class="metric-label">最长任务用时</span>
+              <strong id="metric-longest-task" class="metric-value">0秒</strong>
+              <span id="metric-longest-task-sub" class="metric-sub">单轮连续执行（剔除挂机）</span>
+            </div>
+            <div class="card metric-card" id="card-longest-streak" title="">
+              <span class="metric-label">最长连续天数</span>
+              <strong id="metric-longest-streak" class="metric-value">0 天</strong>
+              <span class="metric-sub">历史最高活跃连击</span>
+            </div>
+            <div class="card metric-card" id="card-current-streak" title="">
+              <span class="metric-label">当前连续天数</span>
+              <strong id="metric-current-streak" class="metric-value">0 天</strong>
+              <span class="metric-sub">本地自然日连续活跃</span>
+            </div>
+          </section>
+
+          <!-- Native Zero-Dependency SVG Token Activity Chart -->
+          <section class="card activity-card" aria-label="Token 活动趋势图表">
+            <div class="activity-header">
+              <div class="activity-title-group">
+                <h2 class="section-heading">Token 活动</h2>
+                <span id="activity-range-caption" class="muted-caption">过去 365 天每日贡献热力图（点击格子下钻筛选日志）</span>
+              </div>
+              <div class="segmented-control" role="tablist" focusgroup="tablist nomemory" aria-label="Token 活动时间维度">
+                <button type="button" role="tab" class="seg-btn" id="charttab-daily" data-chart-view="daily" aria-selected="true" focusgroupstart>每天</button>
+                <button type="button" role="tab" class="seg-btn" id="charttab-weekly" data-chart-view="weekly" aria-selected="false">每周</button>
+                <button type="button" role="tab" class="seg-btn" id="charttab-cumulative" data-chart-view="cumulative" aria-selected="false">累计总量</button>
+              </div>
+            </div>
+
+            <div id="chart-filter-bar" class="active-filter-bar" hidden>
+              <span id="chart-filter-label" class="filter-chip-text">已筛选日期：</span>
+              <button type="button" id="btn-clear-date-filter" class="chip-clear-btn">× 清除日期筛选</button>
+            </div>
+
+            <div class="svg-chart-stage" id="svg-chart-stage">
+              <div id="activity-svg-container" class="activity-svg-container"></div>
+              <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+            </div>
+          </section>
+
+          <!-- Cross-Side / Standalone Conversation Info Drawer -->
+          <section id="session-fallback-card" class="card session-fallback-card" aria-live="polite" hidden>
+            <div class="fallback-head">
+              <div class="fallback-title-group">
+                <span id="fallback-surface-pill" class="pill pill-accent">Desktop (Win)</span>
+                <strong id="fallback-conv-title">会话详情</strong>
+              </div>
+              <button type="button" id="btn-close-fallback" class="icon-btn" aria-label="关闭会话提示">✕</button>
+            </div>
+            <p id="fallback-reason" class="fallback-reason"></p>
+            <div class="fallback-meta-grid" id="fallback-meta-grid"></div>
+            <div class="fallback-actions">
+              <button type="button" id="btn-inspect-conv-local" class="ghost-btn sm">在本监控面板查看该会话上下文</button>
+              <button type="button" id="btn-copy-conv-id" class="ghost-btn sm">复制会话 ID</button>
+            </div>
+          </section>
+
+          <!-- AGY Multi-View Data Table -->
+          <section class="card table-section-card" aria-label="AGY 调用日志与多维汇总">
+            <div class="table-toolbar">
+              <div class="sub-tablist" role="tablist" focusgroup="tablist nomemory" aria-label="全局表格维度">
+                <button type="button" role="tab" class="sub-tab" id="subtab-requests" data-table-tab="requests" aria-selected="true" focusgroupstart>
+                  请求日志
+                  <span id="count-requests" class="tab-count">0</span>
+                </button>
+                <button type="button" role="tab" class="sub-tab" id="subtab-timeline" data-table-tab="timeline" aria-selected="false">
+                  按时间汇总
+                  <span id="count-timeline" class="tab-count">0</span>
+                </button>
+                <button type="button" role="tab" class="sub-tab" id="subtab-projects" data-table-tab="projects" aria-selected="false">
+                  项目/对话排行
+                  <span id="count-projects" class="tab-count">0</span>
+                </button>
+                <button type="button" role="tab" class="sub-tab" id="subtab-models" data-table-tab="models" aria-selected="false">
+                  模型汇总
+                  <span id="count-models" class="tab-count">0</span>
+                </button>
+              </div>
+
+              <div class="table-filters">
+                <div class="table-filter-row" id="time-filter-wrap" role="group" aria-label="按时间范围查看与排序">
+                  <div class="status-filter-group time-preset-group">
+                    <button type="button" class="filter-chip active" data-time-range="all" aria-pressed="true">全部时间</button>
+                    <button type="button" class="filter-chip" data-time-range="1h" aria-pressed="false">近1小时</button>
+                    <button type="button" class="filter-chip" data-time-range="today" aria-pressed="false">今天</button>
+                    <button type="button" class="filter-chip" data-time-range="24h" aria-pressed="false">近24h</button>
+                    <button type="button" class="filter-chip" data-time-range="7d" aria-pressed="false">近7天</button>
+                    <button type="button" class="filter-chip" data-time-range="30d" aria-pressed="false">近30天</button>
+                    <button type="button" class="filter-chip" data-time-range="custom" aria-pressed="false">自定义时段</button>
+                  </div>
+
+                  <button type="button" id="btn-time-sort" class="ghost-btn sm time-sort-btn" title="切换按时间倒序或正序排列">时间: 最新 ↓</button>
+
+                  <div id="timeline-granularity-wrap" class="segmented-control timeline-granularity-switch" role="group" aria-label="按时间汇总粒度" hidden>
+                    <button type="button" class="seg-btn" id="btn-granularity-day" data-timeline-granularity="day" aria-selected="true">按天</button>
+                    <button type="button" class="seg-btn" id="btn-granularity-hour" data-timeline-granularity="hour" aria-selected="false">按小时</button>
+                  </div>
+                </div>
+
+                <div id="custom-time-inputs" class="custom-time-inputs" hidden>
+                  <label for="time-start-input" class="muted-caption">起止：</label>
+                  <input type="datetime-local" id="time-start-input" class="compact-datetime-input" aria-label="自定义开始时间">
+                  <span class="muted-caption">~</span>
+                  <input type="datetime-local" id="time-end-input" class="compact-datetime-input" aria-label="自定义结束时间">
+                  <button type="button" id="btn-reset-time-range" class="ghost-btn sm">重置时间</button>
+                </div>
+
+                <div class="table-filter-row">
+                  <div id="table-active-date-chip" class="filter-pill" hidden>
+                    <span id="table-date-chip-text"></span>
+                    <button type="button" id="btn-clear-date-chip" class="pill-close" aria-label="重置日期筛选">✕</button>
+                  </div>
+
+                  <div id="status-filter-wrap" class="status-filter-group" role="group" aria-label="按步骤状态筛选">
+                    <button type="button" class="filter-chip active" data-status-filter="all" aria-pressed="true">全部 (0)</button>
+                    <button type="button" class="filter-chip" data-status-filter="normal" aria-pressed="false">正常 (0)</button>
+                    <button type="button" class="filter-chip" data-status-filter="checkpoint" aria-pressed="false">压缩 (0)</button>
+                    <button type="button" class="filter-chip" data-status-filter="error" aria-pressed="false">报错 (0)</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div tabindex="0" role="region" aria-labelledby="global-table-caption" class="table-wrapper" id="global-table-wrapper">
+              <table id="global-table" class="agy-table">
+                <caption id="global-table-caption" class="sr-only">AGY 全局模型调用与排行明细表</caption>
+                <thead id="global-table-head"></thead>
+                <tbody id="global-table-body"></tbody>
+              </table>
+            </div>
+
+            <div class="table-footer" id="table-footer">
+              <span id="table-summary-text" class="muted-caption">共 0 条记录</span>
+              <div class="table-footer-actions">
+                <button type="button" id="btn-load-more" class="ghost-btn sm" hidden>加载更多</button>
+                <button type="button" id="btn-scroll-top" class="ghost-btn sm">↑ 回到顶部</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </div>
+</body>
+</html>
