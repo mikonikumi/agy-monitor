@@ -752,10 +752,9 @@ export function createMonitorEngine(options = {}) {
     }
 
     const enableChatAlert = Boolean(settings.enableChatAlert);
-    const enableChatStatusBar = settings.enableChatStatusBar !== false;
 
     const etag = `conv-${shortHash(
-      `${targetConvId}|${snapshotHash}|${enableChatAlert ? 1 : 0}|${enableChatStatusBar ? 1 : 0}|v${settingsVersion}`,
+      `${targetConvId}|${snapshotHash}|${enableChatAlert ? 1 : 0}|v${settingsVersion}`,
     )}`;
 
     const cached = cachedConvPayloads.get(targetConvId || '__empty__');
@@ -812,7 +811,7 @@ export function createMonitorEngine(options = {}) {
         rootConversationId: targetConvId || null,
         ancestors: [],
         siblingSubagents: [],
-        settings: { enableChatAlert, enableChatStatusBar },
+        settings: { enableChatAlert },
         consumption: {
           combinedTotalTokens: 0,
           selfTotalTokens: 0,
@@ -945,7 +944,7 @@ export function createMonitorEngine(options = {}) {
       rootConversationId,
       ancestors,
       siblingSubagents,
-      settings: { enableChatAlert, enableChatStatusBar },
+      settings: { enableChatAlert },
       consumption: {
         ...record.consumption,
         subagents: enrichedSubagents,
@@ -1267,9 +1266,7 @@ export function createMonitorEngine(options = {}) {
   function normalizeEngineSettings(raw) {
     const base = raw && typeof raw === 'object' ? raw : {};
     return {
-      ...base,
       enableChatAlert: Boolean(base.enableChatAlert),
-      enableChatStatusBar: base.enableChatStatusBar !== false,
     };
   }
 
@@ -1672,7 +1669,6 @@ export async function createMonitorServer(options = {}) {
             ok: true,
             settings,
             enableChatAlert: Boolean(settings.enableChatAlert),
-            enableChatStatusBar: settings.enableChatStatusBar !== false,
           });
           return;
         }
@@ -1691,19 +1687,11 @@ export async function createMonitorServer(options = {}) {
             }
             patch.enableChatAlert = body.enableChatAlert;
           }
-          if ('enableChatStatusBar' in body) {
-            if (typeof body.enableChatStatusBar !== 'boolean') {
-              sendJson(res, 400, { error: '"enableChatStatusBar" must be a boolean' });
-              return;
-            }
-            patch.enableChatStatusBar = body.enableChatStatusBar;
-          }
           const updated = engine.updateSettings(patch);
           sendJson(res, 200, {
             ok: true,
             settings: updated,
             enableChatAlert: Boolean(updated.enableChatAlert),
-            enableChatStatusBar: updated.enableChatStatusBar !== false,
           });
           return;
         }

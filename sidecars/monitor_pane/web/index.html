@@ -308,27 +308,13 @@
             </div>
           </section>
 
-          <!-- Real-time Chat Compaction Alert & Inline Chat Shortcut Pill Toggles -->
-          <section class="card alert-toggle-card" id="alert-toggle-card" aria-label="聊天流零 Token 状态胶囊与压缩预警设置">
+          <!-- Real-time Chat Compaction Alert Toggle -->
+          <section class="card alert-toggle-card" id="alert-toggle-card" aria-label="聊天内临近压缩提醒设置">
             <div class="setting-control-row">
               <div class="setting-copy">
-                <label for="chat-statusbar-switch" class="setting-title">聊天框上方对话状态条与快捷入口（零 Token 注入 · 免点 Extensions）</label>
+                <label for="chat-alert-switch" class="setting-title">聊天内临近压缩提醒</label>
                 <p class="setting-desc">
-                  开启后，在会话启动（<code>SessionStart</code>）与每次发送提问前（<code>PreInvocation</code>），直接在聊天流注入轮次、流速、缓存率与 <code>◔ X%</code> 快捷胶囊，点击即可一键唤起 <code>agy-monitor</code> 面板而无需打开 Extensions。
-                </p>
-              </div>
-              <div class="switch-wrap">
-                <input id="chat-statusbar-switch" type="checkbox" switch checked aria-describedby="alert-save-feedback">
-              </div>
-            </div>
-
-            <hr class="section-divider">
-
-            <div class="setting-control-row">
-              <div class="setting-copy">
-                <label for="chat-alert-switch" class="setting-title">聊天内压缩预警（零 Token 注入）</label>
-                <p class="setting-desc">
-                  开启后，当单会话上下文首次突破 <code>80% (204.8k)</code> 或 <code>92% (235.5k)</code> 时，在下一轮提问前向聊天流顶部注入仅用户可见的预警条与快捷跳转链接。
+                  开启后，当单会话上下文首次突破 <code>80% (204.8k)</code> 或 <code>92% (235.5k)</code> 时，在下一轮回复中自动附带压缩预警与面板打开链接。
                 </p>
               </div>
               <div class="switch-wrap">

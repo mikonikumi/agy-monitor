@@ -5,7 +5,6 @@ import path from 'node:path';
 
 export const DEFAULT_SETTINGS = Object.freeze({
   enableChatAlert: true,
-  enableChatStatusBar: true,
 });
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -75,10 +74,6 @@ function normalizeSettingsObject(raw) {
     typeof raw.enableChatAlert === 'boolean'
       ? raw.enableChatAlert
       : DEFAULT_SETTINGS.enableChatAlert;
-  result.enableChatStatusBar =
-    typeof raw.enableChatStatusBar === 'boolean'
-      ? raw.enableChatStatusBar
-      : DEFAULT_SETTINGS.enableChatStatusBar;
   return result;
 }
 
@@ -153,9 +148,6 @@ export function writeSettings(patch, options) {
     }
     if ('enableChatAlert' in patch) {
       merged.enableChatAlert = Boolean(patch.enableChatAlert);
-    }
-    if ('enableChatStatusBar' in patch) {
-      merged.enableChatStatusBar = Boolean(patch.enableChatStatusBar);
     }
   }
   const normalized = normalizeSettingsObject(merged);

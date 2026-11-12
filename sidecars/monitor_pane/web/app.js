@@ -1082,7 +1082,6 @@ export function renderCumulativeAreaSvg(cumulativeEntries = [], { activeDateFilt
 export function createMockConversationData(
   convId = 'mock-conv-wsl-001',
   alertEnabled = true,
-  statusBarEnabled = true,
 ) {
   const rootConvId = 'mock-conv-wsl-001';
   const rootTitle = '构建 agy-monitor 双端上下文与全局 Token 监控插件';
@@ -1162,7 +1161,7 @@ export function createMockConversationData(
         ];
     return {
       unchanged: false,
-      etag: `mock-sub-${convId}-${alertEnabled ? 'on' : 'off'}-${statusBarEnabled ? 'hudon' : 'hudoff'}-v1`,
+      etag: `mock-sub-${convId}-${alertEnabled ? 'on' : 'off'}-v1`,
       conversationId: convId,
       isSubagent: true,
       role: matchedSub.role,
@@ -1185,7 +1184,6 @@ export function createMockConversationData(
       modelName: matchedSub.modelName,
       settings: {
         enableChatAlert: Boolean(alertEnabled),
-        enableChatStatusBar: Boolean(statusBarEnabled),
       },
       consumption: {
         turnCount: isBrowserWorker ? 6 : 4,
@@ -1268,7 +1266,7 @@ export function createMockConversationData(
 
   return {
     unchanged: false,
-    etag: `mock-conv-${alertEnabled ? 'on' : 'off'}-${statusBarEnabled ? 'hudon' : 'hudoff'}-v1`,
+    etag: `mock-conv-${alertEnabled ? 'on' : 'off'}-v1`,
     conversationId: convId,
     isSubagent: false,
     role: null,
@@ -1283,7 +1281,6 @@ export function createMockConversationData(
     modelName: 'Claude Opus 4.6',
     settings: {
       enableChatAlert: Boolean(alertEnabled),
-      enableChatStatusBar: Boolean(statusBarEnabled),
     },
     consumption: {
       turnCount: 14,
@@ -1571,7 +1568,6 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
     convData: null,
     globalData: null,
     mockAlertEnabled: true,
-    mockStatusBarEnabled: true,
     chartView: 'daily',        // 'daily' | 'weekly' | 'cumulative'
     tableSubTab: 'requests',   // 'requests' | 'timeline' | 'projects' | 'models'
     statusFilter: 'all',       // 'all' | 'normal' | 'checkpoint' | 'error'
@@ -1763,7 +1759,6 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       state.convData = createMockConversationData(
         state.conversationId || 'mock-conv-wsl-001',
         state.mockAlertEnabled,
-        state.mockStatusBarEnabled,
       );
       setSyncIndicator('ok', '演示数据');
       renderConversationView(state.convData, { forceRender: force });
@@ -1902,9 +1897,6 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       if (typeof patch.enableChatAlert === 'boolean') {
         state.mockAlertEnabled = patch.enableChatAlert;
       }
-      if (typeof patch.enableChatStatusBar === 'boolean') {
-        state.mockStatusBarEnabled = patch.enableChatStatusBar;
-      }
       if (feedback) {
         feedback.textContent = `${successMsg}（预览模式）`;
       }
@@ -1947,22 +1939,8 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
         switchEl: $('chat-alert-switch'),
         revertChecked: !val,
         successMsg: val
-          ? '已保存：跨越 80% / 92% 时将自动注入零 Token 聊天预警'
-          : '已保存：聊天流压缩预警已关闭，仅在监控面板内部高亮',
-      },
-    );
-  }
-
-  async function updateChatStatusBarSetting(enableChatStatusBar) {
-    const val = Boolean(enableChatStatusBar);
-    return updatePluginSettings(
-      { enableChatStatusBar: val },
-      {
-        switchEl: $('chat-statusbar-switch'),
-        revertChecked: !val,
-        successMsg: val
-          ? '已保存：每轮对话将自动注入零 Token 简要状态条与 ◔ X% 快捷胶囊'
-          : '已保存：已关闭聊天流每轮简要状态条注入',
+          ? '已保存：上下文突破 80% / 92% 时将在下一轮回复中自动附带压缩预警与面板链接'
+          : '已保存：聊天内临近压缩提醒已关闭，仅在监控面板内部高亮',
       },
     );
   }
@@ -2359,11 +2337,7 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       ? `~${formatTokensEn(inactiveSkills.tokens)} (${inactiveSkills.count} 项)`
       : `~${formatTokensEn(inactiveSkills.tokens)}`;
 
-    // Chat Alert & Inline Status Bar Switches
-    const swStatus = $('chat-statusbar-switch');
-    if (swStatus && typeof data.settings?.enableChatStatusBar === 'boolean') {
-      swStatus.checked = data.settings.enableChatStatusBar;
-    }
+    // Chat Compaction Alert Switch
     const sw = $('chat-alert-switch');
     if (sw && typeof data.settings?.enableChatAlert === 'boolean') {
       sw.checked = data.settings.enableChatAlert;
@@ -3516,12 +3490,9 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
     fetchConversationData({ force: true });
   });
 
-  // Chat alert & inline HUD status bar toggle switches
+  // Chat compaction alert toggle switch
   $('chat-alert-switch')?.addEventListener('change', (e) => {
     updateChatAlertSetting(Boolean(e.target.checked));
-  });
-  $('chat-statusbar-switch')?.addEventListener('change', (e) => {
-    updateChatStatusBarSetting(Boolean(e.target.checked));
   });
 
   // Custom datetime-local range inputs

@@ -2,11 +2,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import {
   appendHookEvent,
-  readHookEvents,
   readSettings,
   updateConversationAlertState,
 } from '../sidecars/monitor_pane/lib/state_store.mjs';
@@ -19,12 +17,7 @@ export const COMPACTION_PREV_HIGH_WATER = 150_000;
 export const DEFAULT_TAIL_BYTES = 64 * 1024;
 
 const CLIENT_APPS = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
-const SIDECAR_PILL_LINK = '[查看上下文明细](sidecar://agy-monitor/monitor_pane/)';
-const SAFE_CHILD_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{3,127}$/;
-const MAX_MAIN_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
-const MAX_CHILD_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
-const MAX_CHILD_TRANSCRIPTS = 12;
-const CHILD_SCAN_BUDGET_MS = 15;
+const HEAD_PROBE_BYTES = 16 * 1024;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -34,7 +27,6 @@ function normalizeEventLabel(raw) {
   if (typeof raw !== 'string') return '';
   const trimmed = raw.trim();
   if (!trimmed) return '';
-  if (/^session[-_]?start$/i.test(trimmed)) return 'SessionStart';
   if (/^pre[-_]?invocation$/i.test(trimmed)) return 'PreInvocation';
   if (/^stop$/i.test(trimmed)) return 'Stop';
   return trimmed;
@@ -63,7 +55,7 @@ export function resolveEventName(payload, argv = []) {
         if (val) return val;
       } else if (!arg.startsWith('-')) {
         const val = normalizeEventLabel(arg);
-        if (val === 'SessionStart' || val === 'PreInvocation' || val === 'Stop') {
+        if (val === 'PreInvocation' || val === 'Stop') {
           return val;
         }
       }
@@ -148,11 +140,65 @@ export function resolveTranscriptPath(payload, convId, options) {
   return bestPath;
 }
 
+/**
+ * Returns true if text is purely an AGY `<SYSTEM_MESSAGE>` wakeup or worker brief without `<USER_REQUEST>`.
+ */
+export function isSystemMessageOnlyContent(content) {
+  if (typeof content !== 'string') return false;
+  const trimmed = content.trimStart();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('<SYSTEM_MESSAGE>')) {
+    return true;
+  }
+  if (trimmed.includes('<SYSTEM_MESSAGE>') && !trimmed.includes('<USER_REQUEST>')) {
+    const stripped = trimmed
+      .replace(/The following is a <SYSTEM_MESSAGE>[^\n]*\n*/gi, '')
+      .replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '')
+      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+      .replace(/<user_information>[\s\S]*?<\/user_information>/gi, '')
+      .trim();
+    if (!stripped) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isHookInjectedSystemMessage(content) {
+  if (typeof content !== 'string') return false;
+  const trimmed = content.trimStart();
+  return /^(?:\[Hook\b|\[agy-monitor\])/i.test(trimmed);
+}
+
+function classifyTriggerStep(obj) {
+  if (!isPlainObject(obj)) return null;
+  const type = typeof obj.type === 'string' ? obj.type : '';
+  const content = typeof obj.content === 'string' ? obj.content : '';
+
+  if (type === 'USER_INPUT') {
+    const source = typeof obj.source === 'string' ? obj.source.trim().toUpperCase() : '';
+    if (source === 'SYSTEM' || isSystemMessageOnlyContent(content)) {
+      return 'system';
+    }
+    return 'user';
+  }
+
+  if (type === 'SYSTEM_MESSAGE') {
+    if (!content.trim() || isHookInjectedSystemMessage(content)) {
+      return null;
+    }
+    return 'system';
+  }
+
+  return null;
+}
+
 function parseTranscriptChunkLines(text) {
   let chunkCheckpointCount = 0;
   let sawCheckpointOrPlanner = false;
   let lastRelevantType = null;
   let latestPostCheckpointPlanner = null;
+  let lastTriggerKind = null;
 
   const lines = text.split('\n');
   for (const line of lines) {
@@ -161,6 +207,10 @@ function parseTranscriptChunkLines(text) {
     try {
       const obj = JSON.parse(trimmed);
       if (!isPlainObject(obj)) continue;
+      const triggerKind = classifyTriggerStep(obj);
+      if (triggerKind) {
+        lastTriggerKind = triggerKind;
+      }
       if (obj.type === 'CHECKPOINT') {
         chunkCheckpointCount += 1;
         sawCheckpointOrPlanner = true;
@@ -181,6 +231,7 @@ function parseTranscriptChunkLines(text) {
     sawCheckpointOrPlanner,
     lastRelevantType,
     latestPostCheckpointPlanner,
+    lastTriggerKind,
   };
 }
 
@@ -259,6 +310,8 @@ export function inspectTranscriptTail(transcriptPath, options) {
         inputTokens: 0,
         cacheReadTokens: 0,
         outputTokens: 0,
+        lastTriggerKind: null,
+        usableStartOffset: 0,
       };
     }
 
@@ -322,6 +375,8 @@ export function inspectTranscriptTail(transcriptPath, options) {
         inputTokens: 0,
         cacheReadTokens: 0,
         outputTokens: 0,
+        lastTriggerKind: parsed.lastTriggerKind,
+        usableStartOffset,
       };
     }
 
@@ -337,565 +392,184 @@ export function inspectTranscriptTail(transcriptPath, options) {
       inputTokens,
       cacheReadTokens,
       outputTokens,
+      lastTriggerKind: parsed.lastTriggerKind,
+      usableStartOffset,
     };
   } finally {
     fs.closeSync(fd);
   }
 }
 
-/**
- * Returns true if text is purely an AGY `<SYSTEM_MESSAGE>` wakeup or worker brief without `<USER_REQUEST>`.
- */
-export function isSystemMessageOnlyContent(content) {
-  if (typeof content !== 'string') return false;
-  const trimmed = content.trimStart();
-  if (!trimmed) return false;
-  if (trimmed.startsWith('<SYSTEM_MESSAGE>')) {
-    return true;
-  }
-  if (trimmed.includes('<SYSTEM_MESSAGE>') && !trimmed.includes('<USER_REQUEST>')) {
-    const stripped = trimmed
-      .replace(/The following is a <SYSTEM_MESSAGE>[^\n]*\n*/gi, '')
-      .replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '')
-      .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
-      .replace(/<user_information>[\s\S]*?<\/user_information>/gi, '')
-      .trim();
-    if (!stripped) {
-      return true;
+function inspectTranscriptHeadTrigger(transcriptPath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    const st = fs.fstatSync(fd);
+    if (st.size <= 0) return null;
+    const readLen = Math.min(st.size, HEAD_PROBE_BYTES);
+    const buf = Buffer.allocUnsafe(readLen);
+    const bytesRead = fs.readSync(fd, buf, 0, readLen, 0);
+    let text = buf.subarray(0, bytesRead).toString('utf8');
+    if (bytesRead < st.size) {
+      const lastNl = text.lastIndexOf('\n');
+      if (lastNl !== -1) {
+        text = text.slice(0, lastNl);
+      }
+    }
+
+    let sawSystemTrigger = false;
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed);
+        const kind = classifyTriggerStep(obj);
+        if (kind === 'user') return 'user';
+        if (kind === 'system') sawSystemTrigger = true;
+      } catch {
+        // Ignore partial or malformed line
+      }
+    }
+    return sawSystemTrigger ? 'system' : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close error
+      }
     }
   }
-  return false;
 }
 
-export function formatCompactTokens(tokens) {
-  const n = Math.max(0, Math.floor(Number(tokens) || 0));
-  if (n >= 1_000_000_000) {
-    return `${(n / 1_000_000_000).toFixed(2)}B`;
-  }
-  if (n >= 1_000_000) {
-    return `${(n / 1_000_000).toFixed(1)}M`;
-  }
-  if (n >= 1_000) {
-    return `${(n / 1_000).toFixed(1)}k`;
-  }
-  return String(n);
-}
-
-function formatContextShortTokens(tokens) {
-  const n = Math.max(0, Math.floor(Number(tokens) || 0));
-  if (n >= 1_000) {
-    return `${(n / 1_000).toFixed(1)}k`;
-  }
-  return String(n);
-}
-
-export function formatHudMarkdown(hud) {
-  const turns = Math.max(0, Math.floor(Number(hud?.turns) || 0));
-  const steps = Math.max(0, Math.floor(Number(hud?.steps) || 0));
-  const avgTokPerSec = Math.max(0, Math.round(Number(hud?.avgTokPerSec) || 0));
-  const combinedTotalTokens = Math.max(0, Math.floor(Number(hud?.combinedTotalTokens) || 0));
-  const cacheHitPct = Math.max(0, Math.min(100, Math.round(Number(hud?.cacheHitPct) || 0)));
-  const usedTokens = Math.max(0, Math.floor(Number(hud?.usedTokens) || 0));
-  const usedPct =
-    typeof hud?.usedPct === 'number' && Number.isFinite(hud.usedPct)
-      ? Math.max(0, Math.round(hud.usedPct))
-      : Math.round((usedTokens / CONTEXT_LIMIT) * 100);
-
-  return `⏱ \`${turns} turns ${steps} steps · ${avgTokPerSec} tok/s\` · 🗄 \`${formatCompactTokens(combinedTotalTokens)} tok · Cache hit ${cacheHitPct}%\` · [◔ ${usedPct}% (${formatContextShortTokens(usedTokens)} / 256k)](sidecar://agy-monitor/monitor_pane/)`;
-}
-
-function inferBrainRootDir(transcriptPath, convId) {
+function resolveSiblingSummariesDbPath(transcriptPath, convId) {
   if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) return null;
   const resolved = path.resolve(transcriptPath);
   const norm = resolved.replace(/\\/g, '/');
 
+  let brainDir = null;
   if (norm.endsWith('/.system_generated/logs/transcript.jsonl')) {
     const convDir = path.dirname(path.dirname(path.dirname(resolved)));
-    return path.dirname(convDir);
-  }
-
-  const parentDir = path.dirname(resolved);
-  if (convId && path.basename(parentDir) === convId) {
-    return path.dirname(parentDir);
-  }
-
-  let cursor = parentDir;
-  for (let depth = 0; depth < 6; depth += 1) {
-    if (path.basename(cursor) === 'brain') {
-      return cursor;
+    if (path.basename(path.dirname(convDir)) === 'brain') {
+      brainDir = path.dirname(convDir);
     }
-    const next = path.dirname(cursor);
-    if (next === cursor) break;
-    cursor = next;
+  } else {
+    const parentDir = path.dirname(resolved);
+    if (convId && path.basename(parentDir) === convId && path.basename(path.dirname(parentDir)) === 'brain') {
+      brainDir = path.dirname(parentDir);
+    }
   }
-  return null;
+
+  if (!brainDir) return null;
+  const dbPath = path.join(path.dirname(brainDir), 'conversation_summaries.db');
+  return isExistingFile(dbPath) ? dbPath : null;
 }
 
-function readBoundedFileText(filePath, maxBytes) {
-  const fd = fs.openSync(filePath, 'r');
+function isChildConversationInSummariesDb(transcriptPath, convId) {
   try {
-    const st = fs.fstatSync(fd);
-    if (st.size <= 0) return '';
-    const len = Math.min(st.size, maxBytes);
-    const startOffset = st.size - len;
-    const buf = Buffer.allocUnsafe(len);
-    const bytesRead = fs.readSync(fd, buf, 0, len, startOffset);
-    let slice = buf.subarray(0, bytesRead);
-    if (startOffset > 0) {
-      const nl = slice.indexOf(0x0a);
-      slice = nl === -1 ? Buffer.alloc(0) : slice.subarray(nl + 1);
-    }
-    return slice.toString('utf8');
-  } finally {
-    fs.closeSync(fd);
-  }
-}
+    const dbPath = resolveSiblingSummariesDbPath(transcriptPath, convId);
+    if (!dbPath || !convId) return false;
+    const sqliteMod = process.getBuiltinModule?.('node:sqlite');
+    const DatabaseSync = sqliteMod?.DatabaseSync;
+    if (typeof DatabaseSync !== 'function') return false;
 
-function registerChildId(rawId, selfConvId, childIds) {
-  if (childIds.size >= MAX_CHILD_TRANSCRIPTS) return;
-  if (typeof rawId !== 'string') return;
-  const clean = rawId.trim().replace(/^["']|["']$/g, '');
-  if (!clean || clean === selfConvId || !SAFE_CHILD_ID_RE.test(clean)) return;
-  childIds.add(clean);
-}
+    const db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    try {
+      const colInfo = db.prepare('PRAGMA table_info("conversation_summaries")').all();
+      if (!Array.isArray(colInfo) || colInfo.length === 0) return false;
+      const cols = new Set(colInfo.map((c) => String(c.name)));
+      if (!cols.has('conversation_id')) return false;
 
-function extractChildIdsFromStep(raw, selfConvId, childIds) {
-  if (childIds.size >= MAX_CHILD_TRANSCRIPTS) return;
+      const selectCols = ['parent_conversation_id', 'nesting_depth'].filter((c) => cols.has(c));
+      if (selectCols.length === 0) return false;
 
-  const calls = raw.tool_calls ?? raw.toolCalls;
-  if (Array.isArray(calls)) {
-    for (const tc of calls) {
-      if (!tc || typeof tc !== 'object') continue;
-      const name = String(tc.name || '');
-      if (!name.includes('subagent') && name !== 'swarm') continue;
-      let args = tc.args ?? tc.arguments ?? {};
-      if (typeof args === 'string') {
-        try {
-          args = JSON.parse(args);
-        } catch {
-          args = {};
-        }
+      const row = db
+        .prepare(
+          `SELECT ${selectCols.map((c) => `"${c}"`).join(', ')} FROM "conversation_summaries" WHERE "conversation_id" = ? LIMIT 1`,
+        )
+        .get(convId);
+      if (!row) return false;
+
+      if (
+        typeof row.parent_conversation_id === 'string' &&
+        row.parent_conversation_id.trim().length > 0
+      ) {
+        return true;
       }
-      if (isPlainObject(args)) {
-        const cid = args.conversation_id || args.conversationId || args.child_conversation_id;
-        if (cid) registerChildId(String(cid), selfConvId, childIds);
+      if (Number(row.nesting_depth) > 0) {
+        return true;
       }
+      return false;
+    } finally {
+      db.close();
     }
-  }
-
-  const content = raw.content;
-  if (typeof content !== 'string' || !content) return;
-
-  if (content.includes('conversation://')) {
-    const uriRegex = /conversation:\/\/([a-zA-Z0-9_-]{4,128})/g;
-    let match;
-    while ((match = uriRegex.exec(content)) !== null) {
-      registerChildId(match[1], selfConvId, childIds);
-      if (childIds.size >= MAX_CHILD_TRANSCRIPTS) return;
-    }
-  }
-
-  if (content.includes('conversation_id') || content.includes('conversationId')) {
-    for (const line of content.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
-      try {
-        const parsed = JSON.parse(trimmed);
-        const list = Array.isArray(parsed) ? parsed : [parsed];
-        for (const item of list) {
-          if (!isPlainObject(item) || Array.isArray(item.messages)) continue;
-          const cid =
-            item.conversation_id ||
-            item.conversationId ||
-            item.subagent_conversation_id ||
-            item.agent_conversation_id;
-          if (cid) registerChildId(String(cid), selfConvId, childIds);
-          if (Array.isArray(item.workers)) {
-            for (const w of item.workers) {
-              const wcid = w?.conversation_id || w?.conversationId;
-              if (wcid) registerChildId(String(wcid), selfConvId, childIds);
-            }
-          }
-        }
-      } catch {
-        // Ignore non-JSON lines
-      }
-      if (childIds.size >= MAX_CHILD_TRANSCRIPTS) return;
-    }
-  }
-}
-
-function sumChildTranscriptTokens(brainDir, childId) {
-  if (!brainDir || !childId) {
-    return { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-  }
-  let childPath = null;
-  for (const rel of ['.system_generated/logs/transcript.jsonl', 'transcript.jsonl']) {
-    const candidate = path.join(brainDir, childId, rel);
-    if (isExistingFile(candidate)) {
-      childPath = candidate;
-      break;
-    }
-  }
-  if (!childPath) {
-    return { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-  }
-
-  try {
-    const text = readBoundedFileText(childPath, MAX_CHILD_TRANSCRIPT_BYTES);
-    if (!text) {
-      return { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-    }
-    let inputTokens = 0;
-    let cacheReadTokens = 0;
-    let outputTokens = 0;
-    for (const line of text.split('\n')) {
-      if (!line.includes('tokens') && !line.includes('Tokens')) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (!isPlainObject(obj)) continue;
-        if (obj.type !== 'PLANNER_RESPONSE' && obj.type !== 'CHECKPOINT') continue;
-        inputTokens += Math.max(0, Math.floor(Number(obj.input_tokens ?? obj.inputTokens) || 0));
-        cacheReadTokens += Math.max(
-          0,
-          Math.floor(Number(obj.cache_read_tokens ?? obj.cacheReadTokens) || 0),
-        );
-        outputTokens += Math.max(0, Math.floor(Number(obj.output_tokens ?? obj.outputTokens) || 0));
-      } catch {
-        // Skip malformed line
-      }
-    }
-    return {
-      inputTokens,
-      cacheReadTokens,
-      outputTokens,
-      totalTokens: inputTokens + cacheReadTokens + outputTokens,
-    };
   } catch {
-    return { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
+    return false;
   }
-}
-
-function buildHookTimingWindows(hookEvents) {
-  if (!Array.isArray(hookEvents) || hookEvents.length === 0) return [];
-  const sorted = hookEvents
-    .filter((e) => isPlainObject(e) && Number.isFinite(e.ts) && e.ts > 0)
-    .slice()
-    .sort((a, b) => a.ts - b.ts);
-
-  const windows = [];
-  const openByInv = new Map();
-  let lastOpen = null;
-
-  for (const ev of sorted) {
-    const kind = String(ev.event || '');
-    const inv =
-      typeof ev.invocationNum === 'number' && Number.isFinite(ev.invocationNum)
-        ? ev.invocationNum
-        : null;
-    if (kind === 'PreInvocation') {
-      const win = { preTs: ev.ts, stopTs: null, invocationNum: inv, used: false };
-      windows.push(win);
-      if (inv !== null) openByInv.set(inv, win);
-      lastOpen = win;
-    } else if (kind === 'Stop') {
-      let target = inv !== null ? openByInv.get(inv) : null;
-      if (!target && lastOpen && lastOpen.stopTs === null && ev.ts >= lastOpen.preTs) {
-        target = lastOpen;
-      }
-      if (target) {
-        target.stopTs = ev.ts;
-        if (inv !== null) openByInv.delete(inv);
-        if (lastOpen === target) lastOpen = null;
-      }
-    }
-  }
-  return windows.filter((w) => w.preTs !== null && w.stopTs !== null && w.stopTs > w.preTs);
 }
 
 /**
- * Fast (<20ms), fail-open summary of a conversation's HUD telemetry for inline zero-token status bar.
+ * Returns true if the current invocation belongs to a subagent/worker conversation
+ * or a reactive `<SYSTEM_MESSAGE>` wakeup turn where chat compaction alerts must be skipped.
  */
-export function summarizeConversationForHud(transcriptPath, convId, options = {}) {
-  const startPerf = performance.now();
-  const payload = isPlainObject(options?.payload) ? options.payload : {};
-  const event = normalizeEventLabel(options?.event || '') || 'PreInvocation';
-  const lastUserInput = typeof payload.lastUserInput === 'string' ? payload.lastUserInput : '';
-  const payloadSystemWakeup = isSystemMessageOnlyContent(lastUserInput);
-  const hasGenuinePayloadInput = Boolean(lastUserInput.trim()) && !payloadSystemWakeup;
-  const hasExplicitParent = Boolean(
-    payload.parentConversationId || payload.parent_conversation_id,
-  );
-
-  const fallbackResult = (isSub) => {
-    const minTurns =
-      !isSub && event === 'PreInvocation' && payload.invocationNum === 0 ? 1 : 0;
-    return {
-      isSubagentOrSystemWakeup: Boolean(isSub),
-      turns: minTurns,
-      steps: 0,
-      selfTotalTokens: 0,
-      subagentsTotalTokens: 0,
-      combinedTotalTokens: 0,
-      cacheHitPct: 0,
-      avgTokPerSec: 0,
-      usedTokens: 0,
-      usedPct: 0,
-      checkpointCount: 0,
-      hasPlannerInCycle: false,
-    };
-  };
-
-  try {
-    if (payloadSystemWakeup || hasExplicitParent) {
-      return fallbackResult(true);
-    }
-
-    if (!transcriptPath || !isExistingFile(transcriptPath)) {
-      return fallbackResult(false);
-    }
-
-    const rawText = readBoundedFileText(transcriptPath, MAX_MAIN_TRANSCRIPT_BYTES);
-    if (!rawText.trim()) {
-      return fallbackResult(false);
-    }
-
-    let parsedStepCount = 0;
-    let maxStepIndex = -1;
-    let genuineUserTurns = 0;
-    let hasSubagentSystemBrief = false;
-    let checkpointCount = 0;
-    let hasPlannerInCycle = false;
-    let usedTokens = 0;
-
-    let selfInputTokens = 0;
-    let selfCacheReadTokens = 0;
-    let selfOutputTokens = 0;
-
-    const childIds = new Set();
-    const stepMeta = [];
-    let currentTurnId = 0;
-
-    for (const line of rawText.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let raw;
-      try {
-        raw = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-      if (!isPlainObject(raw)) continue;
-
-      parsedStepCount += 1;
-      const stepIdx =
-        typeof raw.step_index === 'number'
-          ? raw.step_index
-          : typeof raw.stepIndex === 'number'
-            ? raw.stepIndex
-            : -1;
-      if (stepIdx > maxStepIndex) {
-        maxStepIndex = stepIdx;
-      }
-
-      const type = typeof raw.type === 'string' ? raw.type : '';
-      const content = typeof raw.content === 'string' ? raw.content : '';
-      const createdAtStr = raw.created_at ?? raw.createdAt;
-      const parsedMs = typeof createdAtStr === 'string' && createdAtStr ? Date.parse(createdAtStr) : NaN;
-      const createdAtMs = Number.isFinite(parsedMs) ? parsedMs : 0;
-
-      if (type === 'USER_INPUT') {
-        currentTurnId += 1;
-        if (isSystemMessageOnlyContent(content)) {
-          hasSubagentSystemBrief = true;
-        } else {
-          genuineUserTurns += 1;
-        }
-      } else if (type === 'SYSTEM_MESSAGE') {
-        if (content.trim().length > 0) {
-          hasSubagentSystemBrief = true;
-        }
-      }
-
-      const inp = Math.max(0, Math.floor(Number(raw.input_tokens ?? raw.inputTokens) || 0));
-      const cache = Math.max(
-        0,
-        Math.floor(Number(raw.cache_read_tokens ?? raw.cacheReadTokens) || 0),
-      );
-      const out = Math.max(0, Math.floor(Number(raw.output_tokens ?? raw.outputTokens) || 0));
-
-      if (type === 'CHECKPOINT') {
-        checkpointCount += 1;
-        hasPlannerInCycle = false;
-        usedTokens = 0;
-        selfInputTokens += inp;
-        selfCacheReadTokens += cache;
-        selfOutputTokens += out;
-      } else if (type === 'PLANNER_RESPONSE') {
-        hasPlannerInCycle = true;
-        usedTokens = inp + cache + out;
-        selfInputTokens += inp;
-        selfCacheReadTokens += cache;
-        selfOutputTokens += out;
-      }
-
-      extractChildIdsFromStep(raw, convId, childIds);
-
-      stepMeta.push({
-        type,
-        turnId: currentTurnId,
-        createdAtMs,
-        outputTokens: out,
-      });
-    }
-
-    const isSubagentOrSystemWakeup =
-      genuineUserTurns === 0 && !hasGenuinePayloadInput && hasSubagentSystemBrief;
-    if (isSubagentOrSystemWakeup) {
-      return fallbackResult(true);
-    }
-
-    // Compute output streaming speed (avgTokPerSec) from hook windows or adjacent step timestamps >= 1s
-    const hookEvents = convId ? readHookEvents(convId, options) : [];
-    const hookWindows = buildHookTimingWindows(hookEvents);
-    let totalTimedOutputTokens = 0;
-    let totalDurationMs = 0;
-
-    for (let i = 0; i < stepMeta.length; i += 1) {
-      const sm = stepMeta[i];
-      if ((sm.type !== 'PLANNER_RESPONSE' && sm.type !== 'CHECKPOINT') || sm.outputTokens <= 0) {
-        continue;
-      }
-
-      let durationMs = 0;
-      if (sm.type === 'PLANNER_RESPONSE' && hookWindows.length > 0) {
-        for (const win of hookWindows) {
-          if (win.used) continue;
-          if (
-            sm.createdAtMs === 0 ||
-            (sm.createdAtMs >= win.preTs - 1500 && sm.createdAtMs <= win.stopTs + 1500)
-          ) {
-            durationMs = Math.max(1, win.stopTs - win.preTs);
-            win.used = true;
-            break;
-          }
-        }
-        if (durationMs <= 0 && sm.turnId >= 1 && sm.turnId <= hookWindows.length) {
-          const turnWin = hookWindows[sm.turnId - 1];
-          if (turnWin && !turnWin.used) {
-            const plannersInSameTurn = stepMeta.filter(
-              (x) => x.turnId === sm.turnId && x.type === 'PLANNER_RESPONSE',
-            ).length;
-            if (plannersInSameTurn === 1) {
-              durationMs = Math.max(1, turnWin.stopTs - turnWin.preTs);
-              turnWin.used = true;
-            }
-          }
-        }
-      }
-
-      if (durationMs <= 0) {
-        const prev = i > 0 && stepMeta[i - 1].turnId === sm.turnId ? stepMeta[i - 1] : null;
-        const next =
-          i + 1 < stepMeta.length && stepMeta[i + 1].turnId === sm.turnId
-            ? stepMeta[i + 1]
-            : null;
-        const deltaPrev =
-          prev && sm.createdAtMs > 0 && prev.createdAtMs > 0
-            ? sm.createdAtMs - prev.createdAtMs
-            : 0;
-        const deltaNext =
-          next && sm.createdAtMs > 0 && next.createdAtMs > 0
-            ? next.createdAtMs - sm.createdAtMs
-            : 0;
-        if (deltaPrev > 1000) {
-          durationMs = deltaPrev;
-        } else if (deltaNext > 1000) {
-          durationMs = deltaNext;
-        } else {
-          durationMs = 1000;
-        }
-      }
-
-      totalTimedOutputTokens += sm.outputTokens;
-      totalDurationMs += durationMs;
-    }
-
-    const avgTokPerSec =
-      totalDurationMs > 0 && totalTimedOutputTokens > 0
-        ? Math.round(totalTimedOutputTokens / (totalDurationMs / 1000))
-        : 0;
-
-    // Sum spawned child transcripts in the same brain folder within strict <15ms budget
-    let subInputTokens = 0;
-    let subCacheReadTokens = 0;
-    let subOutputTokens = 0;
-    if (childIds.size > 0) {
-      const brainDir = inferBrainRootDir(transcriptPath, convId);
-      if (brainDir) {
-        for (const childId of childIds) {
-          if (performance.now() - startPerf >= CHILD_SCAN_BUDGET_MS) break;
-          const sub = sumChildTranscriptTokens(brainDir, childId);
-          subInputTokens += sub.inputTokens;
-          subCacheReadTokens += sub.cacheReadTokens;
-          subOutputTokens += sub.outputTokens;
-        }
-      }
-    }
-
-    const selfTotalTokens = selfInputTokens + selfCacheReadTokens + selfOutputTokens;
-    const subagentsTotalTokens = subInputTokens + subCacheReadTokens + subOutputTokens;
-    const combinedInput = selfInputTokens + subInputTokens;
-    const combinedCacheRead = selfCacheReadTokens + subCacheReadTokens;
-    const combinedOutput = selfOutputTokens + subOutputTokens;
-    const combinedTotalTokens = combinedInput + combinedCacheRead + combinedOutput;
-    const combinedPrompt = combinedInput + combinedCacheRead;
-    const cacheHitPct =
-      combinedPrompt > 0 ? Math.round((combinedCacheRead / combinedPrompt) * 100) : 0;
-
-    const turns =
-      event === 'PreInvocation' && payload.invocationNum === 0
-        ? Math.max(1, genuineUserTurns)
-        : genuineUserTurns;
-    const steps = parsedStepCount > 0 ? Math.max(parsedStepCount, maxStepIndex + 1) : 0;
-    const usedPct = Math.round((usedTokens / CONTEXT_LIMIT) * 100);
-
-    return {
-      isSubagentOrSystemWakeup: false,
-      turns,
-      steps,
-      selfTotalTokens,
-      subagentsTotalTokens,
-      combinedTotalTokens,
-      cacheHitPct,
-      avgTokPerSec,
-      usedTokens,
-      usedPct,
-      checkpointCount,
-      hasPlannerInCycle,
-    };
-  } catch {
-    return fallbackResult(false);
+export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot) {
+  if (
+    Boolean(
+      payload?.parentConversationId ||
+        payload?.parent_conversation_id ||
+        payload?.isSubagent === true ||
+        payload?.subagent === true,
+    )
+  ) {
+    return true;
   }
+
+  const lastUserInput =
+    typeof payload?.lastUserInput === 'string'
+      ? payload.lastUserInput
+      : typeof payload?.last_user_input === 'string'
+        ? payload.last_user_input
+        : '';
+  if (isSystemMessageOnlyContent(lastUserInput)) {
+    return true;
+  }
+
+  if (snapshot?.lastTriggerKind === 'system') {
+    return true;
+  }
+
+  if (
+    snapshot &&
+    snapshot.lastTriggerKind === null &&
+    snapshot.usableStartOffset > 0 &&
+    transcriptPath &&
+    inspectTranscriptHeadTrigger(transcriptPath) === 'system'
+  ) {
+    return true;
+  }
+
+  if (transcriptPath && convId && isChildConversationInSummariesDb(transcriptPath, convId)) {
+    return true;
+  }
+
+  return false;
 }
 
-function buildAlertMarkdown(level, usedTokens) {
+export function buildAlertSystemMessage(level, usedTokens) {
   const usedK = (usedTokens / 1000).toFixed(1);
   const pct = ((usedTokens / CONTEXT_LIMIT) * 100).toFixed(1);
-  return level === 92
-    ? `🚨 **上下文紧急预警**：当前会话已占用 **${usedK}k / 256k (${pct}%)**，即将触发自动压缩红线（~250k）！ ${SIDECAR_PILL_LINK}`
-    : `⚠️ **上下文预警**：当前会话已占用 **${usedK}k / 256k (${pct}%)**，接近自动压缩红线（~250k）。 ${SIDECAR_PILL_LINK}`;
+  const clause = level === 92 ? '即将触发自动压缩线（~250k）！' : '接近自动压缩线（~250k）。';
+  return `[agy-monitor] 当前会话上下文已占用 ${usedK}k / 256k (${pct}%)，${clause}请在本次回复开头用一句话顺便提醒用户，并附上快捷入口 [打开 agy-monitor](sidecar://agy-monitor/monitor_pane/)。`;
 }
 
-function wrapUserMarkdownStep(userMarkdown) {
+function wrapSystemMessageStep(message) {
   return {
     injectSteps: [
       {
         systemMessage: {
-          systemMessage: '',
-          metadata: {
-            user_markdown: userMarkdown,
-          },
+          systemMessage: message,
         },
       },
     ],
@@ -930,6 +604,10 @@ export function runHook(rawStdin, options = {}) {
     }
 
     const event = resolveEventName(payload, options.argv);
+    if (event !== 'PreInvocation' && event !== 'Stop') {
+      return {};
+    }
+
     const rawInvocationNum = payload.invocationNum ?? payload.executionNum;
     const invocationNum =
       typeof rawInvocationNum === 'number' && Number.isFinite(rawInvocationNum)
@@ -964,111 +642,74 @@ export function runHook(rawStdin, options = {}) {
       options,
     );
 
-    if (event === 'Stop') {
+    if (event !== 'PreInvocation') {
       return {};
     }
 
     const settings = readSettings(options);
     const enableChatAlert = settings.enableChatAlert !== false;
-    const enableChatStatusBar = settings.enableChatStatusBar !== false;
 
-    if (event === 'SessionStart') {
-      if (!enableChatStatusBar) {
-        return {};
-      }
-      const transcriptPath = resolveTranscriptPath(payload, convId, options);
-      const hud = summarizeConversationForHud(transcriptPath, convId, {
-        ...options,
-        payload,
-        event: 'SessionStart',
-      });
-      if (hud.isSubagentOrSystemWakeup) {
-        return {};
-      }
-      return wrapUserMarkdownStep(formatHudMarkdown(hud));
-    }
-
-    if (event !== 'PreInvocation') {
+    const transcriptPath = resolveTranscriptPath(payload, convId, options);
+    if (!transcriptPath) {
       return {};
     }
 
-    const transcriptPath = resolveTranscriptPath(payload, convId, options);
-    let alertMarkdown = '';
+    const snapshot = inspectTranscriptTail(transcriptPath, options);
+    const skipAlert =
+      enableChatAlert &&
+      snapshot.hasPlannerInCycle &&
+      snapshot.usedTokens >= THRESHOLD_80 &&
+      isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot);
 
-    if (transcriptPath) {
-      const snapshot = inspectTranscriptTail(transcriptPath, options);
-      let alertLevelToEmit = 0;
+    let alertLevelToEmit = 0;
 
-      updateConversationAlertState(
-        convId,
-        (prev) => {
-          let alerted80 = Boolean(prev.alerted80);
-          let alerted92 = Boolean(prev.alerted92);
+    updateConversationAlertState(
+      convId,
+      (prev) => {
+        let alerted80 = Boolean(prev.alerted80);
+        let alerted92 = Boolean(prev.alerted92);
 
-          const compactedByCheckpoint = snapshot.checkpointCount > (prev.lastCheckpointCount || 0);
-          const compactedByTokenDrop =
-            snapshot.hasPlannerInCycle &&
-            snapshot.usedTokens < COMPACTION_DROP_THRESHOLD &&
-            (prev.lastContextTokens || 0) >= COMPACTION_PREV_HIGH_WATER;
+        const compactedByCheckpoint = snapshot.checkpointCount > (prev.lastCheckpointCount || 0);
+        const compactedByTokenDrop =
+          snapshot.hasPlannerInCycle &&
+          snapshot.usedTokens < COMPACTION_DROP_THRESHOLD &&
+          (prev.lastContextTokens || 0) >= COMPACTION_PREV_HIGH_WATER;
 
-          if (compactedByCheckpoint || compactedByTokenDrop) {
-            alerted80 = false;
-            alerted92 = false;
+        if (compactedByCheckpoint || compactedByTokenDrop) {
+          alerted80 = false;
+          alerted92 = false;
+        }
+
+        if (enableChatAlert && snapshot.hasPlannerInCycle && !skipAlert) {
+          if (snapshot.usedTokens >= THRESHOLD_92 && !alerted92) {
+            alertLevelToEmit = 92;
+            alerted92 = true;
+            alerted80 = true;
+          } else if (snapshot.usedTokens >= THRESHOLD_80 && !alerted80) {
+            alertLevelToEmit = 80;
+            alerted80 = true;
           }
+        }
 
-          if (enableChatAlert && snapshot.hasPlannerInCycle) {
-            if (snapshot.usedTokens >= THRESHOLD_92 && !alerted92) {
-              alertLevelToEmit = 92;
-              alerted92 = true;
-              alerted80 = true;
-            } else if (snapshot.usedTokens >= THRESHOLD_80 && !alerted80) {
-              alertLevelToEmit = 80;
-              alerted80 = true;
-            }
-          }
+        const nextContextTokens = snapshot.hasPlannerInCycle
+          ? snapshot.usedTokens
+          : compactedByCheckpoint
+            ? 0
+            : prev.lastContextTokens || 0;
 
-          const nextContextTokens = snapshot.hasPlannerInCycle
-            ? snapshot.usedTokens
-            : compactedByCheckpoint
-              ? 0
-              : prev.lastContextTokens || 0;
+        return {
+          alerted80,
+          alerted92,
+          lastCheckpointCount: Math.max(prev.lastCheckpointCount || 0, snapshot.checkpointCount),
+          lastContextTokens: nextContextTokens,
+          updatedAt: now,
+        };
+      },
+      options,
+    );
 
-          return {
-            alerted80,
-            alerted92,
-            lastCheckpointCount: Math.max(prev.lastCheckpointCount || 0, snapshot.checkpointCount),
-            lastContextTokens: nextContextTokens,
-            updatedAt: now,
-          };
-        },
-        options,
-      );
-
-      if (alertLevelToEmit === 80 || alertLevelToEmit === 92) {
-        alertMarkdown = buildAlertMarkdown(alertLevelToEmit, snapshot.usedTokens);
-      }
-    }
-
-    let hudMarkdown = '';
-    if (enableChatStatusBar && payload.invocationNum === 0) {
-      const hud = summarizeConversationForHud(transcriptPath, convId, {
-        ...options,
-        payload,
-        event: 'PreInvocation',
-      });
-      if (!hud.isSubagentOrSystemWakeup) {
-        hudMarkdown = formatHudMarkdown(hud);
-      }
-    }
-
-    if (alertMarkdown && hudMarkdown) {
-      return wrapUserMarkdownStep(`${alertMarkdown}\n\n${hudMarkdown}`);
-    }
-    if (alertMarkdown) {
-      return wrapUserMarkdownStep(alertMarkdown);
-    }
-    if (hudMarkdown) {
-      return wrapUserMarkdownStep(hudMarkdown);
+    if (alertLevelToEmit === 80 || alertLevelToEmit === 92) {
+      return wrapSystemMessageStep(buildAlertSystemMessage(alertLevelToEmit, snapshot.usedTokens));
     }
 
     return {};
