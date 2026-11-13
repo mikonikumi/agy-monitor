@@ -5,9 +5,32 @@ import path from 'node:path';
 
 export const DEFAULT_SETTINGS = Object.freeze({
   enableChatAlert: true,
+  language: 'auto',
 });
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Normalize language preference strictly to `'auto' | 'zh' | 'en'`.
+ * Accepts locale variants like `'zh-CN'`/`'zh-TW'` -> `'zh'` and `'en-US'`/`'en-GB'` -> `'en'`.
+ * Never reads `process.env.LANG`.
+ */
+export function normalizeLanguageSetting(raw) {
+  if (typeof raw !== 'string') {
+    return 'auto';
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized || normalized === 'auto') {
+    return 'auto';
+  }
+  if (normalized === 'zh' || normalized.startsWith('zh-') || normalized.startsWith('zh_')) {
+    return 'zh';
+  }
+  if (normalized === 'en' || normalized.startsWith('en-') || normalized.startsWith('en_')) {
+    return 'en';
+  }
+  return 'auto';
+}
 
 /**
  * Resolve persistent plugin data directory.
@@ -74,6 +97,7 @@ function normalizeSettingsObject(raw) {
     typeof raw.enableChatAlert === 'boolean'
       ? raw.enableChatAlert
       : DEFAULT_SETTINGS.enableChatAlert;
+  result.language = normalizeLanguageSetting(raw.language);
   return result;
 }
 
@@ -148,6 +172,9 @@ export function writeSettings(patch, options) {
     }
     if ('enableChatAlert' in patch) {
       merged.enableChatAlert = Boolean(patch.enableChatAlert);
+    }
+    if ('language' in patch) {
+      merged.language = normalizeLanguageSetting(patch.language);
     }
   }
   const normalized = normalizeSettingsObject(merged);

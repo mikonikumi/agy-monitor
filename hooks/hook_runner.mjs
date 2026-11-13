@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendHookEvent,
+  normalizeLanguageSetting,
   readSettings,
   updateConversationAlertState,
 } from '../sidecars/monitor_pane/lib/state_store.mjs';
@@ -557,9 +558,16 @@ export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapsh
   return false;
 }
 
-export function buildAlertSystemMessage(level, usedTokens) {
+export function buildAlertSystemMessage(level, usedTokens, language = 'auto') {
   const usedK = (usedTokens / 1000).toFixed(1);
   const pct = ((usedTokens / CONTEXT_LIMIT) * 100).toFixed(1);
+  const lang = normalizeLanguageSetting(language);
+  if (lang === 'en') {
+    if (level === 92) {
+      return `[agy-monitor] Current session context reached ${usedK}k / 256k (${pct}%), critically close to auto-compaction (~250k)! Please briefly warn the user at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
+    }
+    return `[agy-monitor] Current session context reached ${usedK}k / 256k (${pct}%), approaching auto-compaction (~250k). Please briefly mention this once at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
+  }
   const clause = level === 92 ? '即将触发自动压缩线（~250k）！' : '接近自动压缩线（~250k）。';
   return `[agy-monitor] 当前会话上下文已占用 ${usedK}k / 256k (${pct}%)，${clause}请在本次回复开头用一句话顺便提醒用户，并附上快捷入口 [打开 agy-monitor](sidecar://agy-monitor/monitor_pane/)。`;
 }
@@ -648,6 +656,10 @@ export function runHook(rawStdin, options = {}) {
 
     const settings = readSettings(options);
     const enableChatAlert = settings.enableChatAlert !== false;
+    const optionLanguage =
+      options?.language !== undefined ? normalizeLanguageSetting(options.language) : 'auto';
+    const alertLanguage =
+      optionLanguage !== 'auto' ? optionLanguage : normalizeLanguageSetting(settings.language);
 
     const transcriptPath = resolveTranscriptPath(payload, convId, options);
     if (!transcriptPath) {
@@ -709,7 +721,9 @@ export function runHook(rawStdin, options = {}) {
     );
 
     if (alertLevelToEmit === 80 || alertLevelToEmit === 92) {
-      return wrapSystemMessageStep(buildAlertSystemMessage(alertLevelToEmit, snapshot.usedTokens));
+      return wrapSystemMessageStep(
+        buildAlertSystemMessage(alertLevelToEmit, snapshot.usedTokens, alertLanguage),
+      );
     }
 
     return {};

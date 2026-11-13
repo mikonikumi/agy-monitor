@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   getDefaultDataDir,
+  normalizeLanguageSetting,
   readHookEvents,
   readSettings,
   sanitizeConvId,
@@ -752,9 +753,10 @@ export function createMonitorEngine(options = {}) {
     }
 
     const enableChatAlert = Boolean(settings.enableChatAlert);
+    const language = normalizeLanguageSetting(settings.language);
 
     const etag = `conv-${shortHash(
-      `${targetConvId}|${snapshotHash}|${enableChatAlert ? 1 : 0}|v${settingsVersion}`,
+      `${targetConvId}|${snapshotHash}|${enableChatAlert ? 1 : 0}|${language}|v${settingsVersion}`,
     )}`;
 
     const cached = cachedConvPayloads.get(targetConvId || '__empty__');
@@ -811,7 +813,7 @@ export function createMonitorEngine(options = {}) {
         rootConversationId: targetConvId || null,
         ancestors: [],
         siblingSubagents: [],
-        settings: { enableChatAlert },
+        settings: { enableChatAlert, language },
         consumption: {
           combinedTotalTokens: 0,
           selfTotalTokens: 0,
@@ -944,7 +946,7 @@ export function createMonitorEngine(options = {}) {
       rootConversationId,
       ancestors,
       siblingSubagents,
-      settings: { enableChatAlert },
+      settings: { enableChatAlert, language },
       consumption: {
         ...record.consumption,
         subagents: enrichedSubagents,
@@ -1267,6 +1269,7 @@ export function createMonitorEngine(options = {}) {
     const base = raw && typeof raw === 'object' ? raw : {};
     return {
       enableChatAlert: Boolean(base.enableChatAlert),
+      language: normalizeLanguageSetting(base.language),
     };
   }
 
@@ -1669,6 +1672,7 @@ export async function createMonitorServer(options = {}) {
             ok: true,
             settings,
             enableChatAlert: Boolean(settings.enableChatAlert),
+            language: settings.language,
           });
           return;
         }
@@ -1687,11 +1691,19 @@ export async function createMonitorServer(options = {}) {
             }
             patch.enableChatAlert = body.enableChatAlert;
           }
+          if ('language' in body) {
+            if (typeof body.language !== 'string') {
+              sendJson(res, 400, { error: '"language" must be a string' });
+              return;
+            }
+            patch.language = normalizeLanguageSetting(body.language);
+          }
           const updated = engine.updateSettings(patch);
           sendJson(res, 200, {
             ok: true,
             settings: updated,
             enableChatAlert: Boolean(updated.enableChatAlert),
+            language: updated.language,
           });
           return;
         }
@@ -1713,7 +1725,11 @@ export async function createMonitorServer(options = {}) {
         const actualServerPort =
           typeof addr === 'object' && addr && addr.port ? addr.port : requestedPort;
         const safeOrigin = resolveSafeFullscreenOrigin(body?.clientOrigin, actualServerPort);
-        const targetUrl = `${safeOrigin}/?tab=global&fullscreen=1&token=${encodeURIComponent(token)}`;
+        const normalizedLang =
+          typeof body?.lang === 'string' ? normalizeLanguageSetting(body.lang) : 'auto';
+        const langSuffix =
+          normalizedLang === 'en' || normalizedLang === 'zh' ? `&lang=${normalizedLang}` : '';
+        const targetUrl = `${safeOrigin}/?tab=global&fullscreen=1&token=${encodeURIComponent(token)}${langSuffix}`;
 
         let opened = false;
         try {
