@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseContextLimitValue } from './discovery.mjs';
 
 export const CONTEXT_LIMIT = 256_000;
 export const AUTOCOMPACT_BUFFER = 6_000;
@@ -1152,13 +1153,46 @@ function matchDiscoveredSkill(readSkillPath, discoveredSkills) {
   return null;
 }
 
+function readWorkspaceContextLimit(workspacePath) {
+  const ws = normalizeFsPath(workspacePath);
+  if (!ws) return null;
+  const cfgPath = path.join(ws, '.antigravity', 'settings.json');
+  try {
+    if (!isFile(cfgPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    return parseContextLimitValue(
+      parsed?.contextWindow ?? parsed?.context_window ?? parsed?.contextLimit,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export function resolveContextWindowCapacity(rawLimit, workspacePath = '', rawBuffer = AUTOCOMPACT_BUFFER) {
+  const explicitLimit =
+    parseContextLimitValue(rawLimit) || readWorkspaceContextLimit(workspacePath) || CONTEXT_LIMIT;
+  const parsedBuf = Number(rawBuffer);
+  const autocompactBuffer = Number.isFinite(parsedBuf) && parsedBuf >= 0
+    ? Math.min(Math.round(parsedBuf), Math.floor(explicitLimit * 0.2))
+    : Math.min(AUTOCOMPACT_BUFFER, Math.floor(explicitLimit * 0.2));
+  const safeLimit = Math.max(0, explicitLimit - autocompactBuffer);
+  return {
+    limit: explicitLimit,
+    autocompactBuffer,
+    safeLimit,
+    warningThreshold: Math.round(explicitLimit * 0.8),
+    criticalThreshold: Math.round(explicitLimit * 0.92),
+  };
+}
+
 /**
- * Compute exact 256K-anchored context breakdown using Static Base Lock + Step Delta attribution.
+ * Compute exact context breakdown anchored to the detected window limit using Static Base Lock + Step Delta attribution.
  *
  * @param {object} [params]
  * @param {Array<object>} [params.steps]
  * @param {string} [params.workspacePath]
  * @param {string} [params.geminiDir]
+ * @param {number | string} [params.contextLimit]
  * @param {object} [params.options]
  */
 export function computeContextBreakdown(params = {}) {
@@ -1166,6 +1200,7 @@ export function computeContextBreakdown(params = {}) {
     steps: rawSteps = [],
     workspacePath,
     geminiDir,
+    contextLimit,
     options = {},
     ...restTopLevel
   } = params || {};
@@ -1175,7 +1210,14 @@ export function computeContextBreakdown(params = {}) {
     ...(options && typeof options === 'object' ? options : {}),
     workspacePath: workspacePath ?? options?.workspacePath,
     geminiDir: geminiDir ?? options?.geminiDir,
+    contextLimit: contextLimit ?? options?.contextLimit,
   };
+
+  const capacity = resolveContextWindowCapacity(
+    mergedOpts.contextLimit,
+    mergedOpts.workspacePath,
+    mergedOpts.autocompactBuffer,
+  );
 
   const customizations =
     mergedOpts.customizations ||
@@ -1235,6 +1277,7 @@ export function computeContextBreakdown(params = {}) {
       readFilePathsInCycle: new Set(),
       topSpikes: [],
       maxTopSpikes,
+      capacity,
     });
   }
 
@@ -1537,7 +1580,7 @@ export function computeContextBreakdown(params = {}) {
                   deltaTokens: roundedSpike,
                   tokens: roundedSpike,
                   percent: Number(
-                    ((roundedSpike / CONTEXT_LIMIT) * 100).toFixed(2)
+                    ((roundedSpike / capacity.limit) * 100).toFixed(2)
                   ),
                   createdAt: item.createdAt,
                 });
@@ -1605,6 +1648,7 @@ export function computeContextBreakdown(params = {}) {
     readFilePathsInCycle,
     topSpikes,
     maxTopSpikes,
+    capacity,
   });
 }
 
@@ -1617,14 +1661,18 @@ function buildBreakdownResult({
   readFilePathsInCycle,
   topSpikes,
   maxTopSpikes,
+  capacity = resolveContextWindowCapacity(CONTEXT_LIMIT),
 }) {
-  const freeTokens = Math.max(0, SAFE_LIMIT - usedTokens);
-  const usedPercent = Number(((usedTokens / CONTEXT_LIMIT) * 100).toFixed(1));
+  const activeLimit = capacity.limit;
+  const activeBuffer = capacity.autocompactBuffer;
+  const activeSafeLimit = capacity.safeLimit;
+  const freeTokens = Math.max(0, activeSafeLimit - usedTokens);
+  const usedPercent = Number(((usedTokens / activeLimit) * 100).toFixed(1));
 
   let alertLevel = 'normal';
-  if (usedTokens >= CRITICAL_THRESHOLD) {
+  if (usedTokens >= capacity.criticalThreshold) {
     alertLevel = 'critical';
-  } else if (usedTokens >= WARNING_THRESHOLD) {
+  } else if (usedTokens >= capacity.warningThreshold) {
     alertLevel = 'warning';
   }
 
@@ -1634,7 +1682,7 @@ function buildBreakdownResult({
       id: def.id,
       label: def.label,
       tokens,
-      percent: Number(((tokens / CONTEXT_LIMIT) * 100).toFixed(2)),
+      percent: Number(((tokens / activeLimit) * 100).toFixed(2)),
       usedSharePercent:
         usedTokens > 0 ? Number(((tokens / usedTokens) * 100).toFixed(1)) : 0,
     };
@@ -1655,7 +1703,7 @@ function buildBreakdownResult({
         bytes: r.bytes,
         estimatedTokens: r.estimatedTokens,
         tokens,
-        percent: Number(((tokens / CONTEXT_LIMIT) * 100).toFixed(2)),
+        percent: Number(((tokens / activeLimit) * 100).toFixed(2)),
       };
     })
     .sort((a, b) => b.tokens - a.tokens || b.estimatedTokens - a.estimatedTokens);
@@ -1698,7 +1746,7 @@ function buildBreakdownResult({
       estimatedTokens: m.estimatedTokens,
       tokens,
       deferredTokens: m.deferredTokens || 0,
-      percent: Number(((tokens / CONTEXT_LIMIT) * 100).toFixed(2)),
+      percent: Number(((tokens / activeLimit) * 100).toFixed(2)),
       path: m.path,
     });
   });
@@ -1804,7 +1852,7 @@ function buildBreakdownResult({
         tokens,
         estimatedTokens: it.estimatedTokens,
         deferredTokens: it.deferredTokens,
-        percent: Number(((tokens / CONTEXT_LIMIT) * 100).toFixed(2)),
+        percent: Number(((tokens / activeLimit) * 100).toFixed(2)),
       };
     })
     .sort((a, b) => {
@@ -1827,9 +1875,9 @@ function buildBreakdownResult({
     .slice(0, Math.max(1, maxTopSpikes));
 
   return {
-    limit: CONTEXT_LIMIT,
-    autocompactBuffer: AUTOCOMPACT_BUFFER,
-    safeLimit: SAFE_LIMIT,
+    limit: activeLimit,
+    autocompactBuffer: activeBuffer,
+    safeLimit: activeSafeLimit,
     usedTokens,
     usedPercent,
     freeTokens,

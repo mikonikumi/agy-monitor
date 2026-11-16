@@ -552,6 +552,67 @@ export function parseGenMetadataProtobuf(rawBuf) {
   };
 }
 
+function findProtoSubfield(buf, targetFieldNo, targetWireType) {
+  let pos = 0;
+  let found = null;
+  while (pos < buf.length) {
+    const tag = readProtoVarint(buf, pos);
+    if (!tag) break;
+    pos = tag.nextPos;
+    const fieldNo = Math.floor(tag.value / 8);
+    const wireType = tag.value % 8;
+    if (wireType === 0) {
+      const v = readProtoVarint(buf, pos);
+      if (!v) break;
+      pos = v.nextPos;
+      if (fieldNo === targetFieldNo && targetWireType === 0) {
+        found = v.value;
+      }
+    } else if (wireType === 2) {
+      const lenRes = readProtoVarint(buf, pos);
+      if (!lenRes || lenRes.value < 0) break;
+      const end = lenRes.nextPos + lenRes.value;
+      if (end > buf.length) break;
+      if (fieldNo === targetFieldNo && targetWireType === 2) {
+        found = buf.subarray(lenRes.nextPos, end);
+      }
+      pos = end;
+    } else if (wireType === 1) {
+      pos += 8;
+    } else if (wireType === 5) {
+      pos += 4;
+    } else {
+      break;
+    }
+  }
+  return found;
+}
+
+/**
+ * Decodes the active conversation context/compaction window limit from an AGY
+ * `conversations/<convId>.db` `executor_metadata.data` protobuf blob (field path `10 -> 2 -> 5`).
+ *
+ * @param {Buffer | Uint8Array | null | undefined} rawBuf
+ * @returns {number | null}
+ */
+export function parseExecutorMetadataContextLimit(rawBuf) {
+  if (!rawBuf || !(rawBuf instanceof Uint8Array) || rawBuf.length === 0) {
+    return null;
+  }
+  const buf = Buffer.isBuffer(rawBuf)
+    ? rawBuf
+    : Buffer.from(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+  const f10 = findProtoSubfield(buf, 10, 2);
+  if (!f10) return null;
+  const f2 = findProtoSubfield(f10, 2, 2);
+  if (!f2) return null;
+  const limit = findProtoSubfield(f2, 5, 0);
+  if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 16_000 && limit <= 10_000_000) {
+    return Math.round(limit);
+  }
+  return null;
+}
+
 const BRAIN_TRANSCRIPT_PATH_REGEX =
   /[\\/]brain[\\/]([^\\/]+)[\\/](?:\.system_generated[\\/]logs[\\/])?transcript\.jsonl$/i;
 
@@ -649,26 +710,58 @@ export function readTrajectoryDbModels(dbPath, prevDbState = null, preDbStat = n
   let firstModel = canAppend ? prevDbState.firstModel || '' : '';
   let latestModel = canAppend ? prevDbState.latestModel || '' : '';
   let maxIdx = canAppend ? prevDbState.maxIdx : -1;
+  let execMaxIdx = canAppend && typeof prevDbState.execMaxIdx === 'number' ? prevDbState.execMaxIdx : -1;
+  let contextLimit = canAppend && prevDbState.contextLimit ? prevDbState.contextLimit : null;
+  let hasExecTable = canAppend ? Boolean(prevDbState.hasExecTable) : false;
 
   let db = null;
   try {
     db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    let hasGenTable = canAppend;
     if (!canAppend) {
-      const tbl = db
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gen_metadata'")
-        .get();
-      if (!tbl) {
-        return {
-          dbPath,
-          mtimeMs: dbStat.mtimeMs,
-          size: dbStat.size,
-          maxIdx: -1,
-          stepModels,
-          firstModel: '',
-          latestModel: '',
-          sig: `${dbPath}:${dbStat.mtimeMs}:${dbStat.size}:empty`,
-        };
+      const tables = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('gen_metadata', 'executor_metadata')",
+        )
+        .all();
+      const names = new Set(tables.map((t) => t.name));
+      hasGenTable = names.has('gen_metadata');
+      hasExecTable = names.has('executor_metadata');
+    }
+
+    if (hasExecTable) {
+      const execRow =
+        execMaxIdx >= 0
+          ? db
+              .prepare('SELECT idx, data FROM executor_metadata WHERE idx > ? ORDER BY idx DESC LIMIT 1')
+              .get(execMaxIdx)
+          : db.prepare('SELECT idx, data FROM executor_metadata ORDER BY idx DESC LIMIT 1').get();
+      if (execRow) {
+        const eIdx = typeof execRow.idx === 'number' ? execRow.idx : Number(execRow.idx);
+        if (Number.isFinite(eIdx) && eIdx > execMaxIdx) {
+          execMaxIdx = eIdx;
+        }
+        const parsedLimit = parseExecutorMetadataContextLimit(execRow.data);
+        if (parsedLimit) {
+          contextLimit = parsedLimit;
+        }
       }
+    }
+
+    if (!hasGenTable) {
+      return {
+        dbPath,
+        mtimeMs: dbStat.mtimeMs,
+        size: dbStat.size,
+        maxIdx: -1,
+        execMaxIdx,
+        hasExecTable,
+        stepModels,
+        firstModel: '',
+        latestModel: '',
+        contextLimit,
+        sig: `${dbPath}:${dbStat.mtimeMs}:${dbStat.size}:empty:${contextLimit || 0}`,
+      };
     }
 
     const rows = canAppend
@@ -695,10 +788,13 @@ export function readTrajectoryDbModels(dbPath, prevDbState = null, preDbStat = n
       mtimeMs: dbStat.mtimeMs,
       size: dbStat.size,
       maxIdx,
+      execMaxIdx,
+      hasExecTable,
       stepModels,
       firstModel,
       latestModel,
-      sig: `${dbPath}:${dbStat.mtimeMs}:${dbStat.size}:${maxIdx}:${latestModel}`,
+      contextLimit,
+      sig: `${dbPath}:${dbStat.mtimeMs}:${dbStat.size}:${maxIdx}:${latestModel}:${contextLimit || 0}`,
     };
   } catch {
     return prevDbState || null;
@@ -1724,6 +1820,7 @@ function finalizeTranscriptState(
     wasReset,
     steps: finalizedSteps,
     modelName: latestResolvedModel,
+    contextLimit: trajDbState?.contextLimit || null,
     totals,
     selfTotalTokens: sumTotalTokens,
     selfContextTokens: activeCycleContextTokens,
@@ -1980,10 +2077,15 @@ export function parseTranscriptIncremental(
   );
 }
 
-function stampInheritedModel(baseParsed, inheritedModel) {
-  if (!inheritedModel) return baseParsed;
-  const needsStepStamp = baseParsed.steps.some((s) => !s.modelName);
-  if (baseParsed.modelName === inheritedModel && !needsStepStamp) {
+function stampInheritedMetadata(baseParsed, inheritedModel, inheritedLimit) {
+  const needsStepStamp = Boolean(inheritedModel) && baseParsed.steps.some((s) => !s.modelName);
+  const nextModel = baseParsed.modelName || inheritedModel || '';
+  const nextLimit = baseParsed.contextLimit || inheritedLimit || null;
+  if (
+    nextModel === baseParsed.modelName &&
+    nextLimit === baseParsed.contextLimit &&
+    !needsStepStamp
+  ) {
     return baseParsed;
   }
   const steps = needsStepStamp
@@ -1991,9 +2093,12 @@ function stampInheritedModel(baseParsed, inheritedModel) {
     : baseParsed.steps;
   return {
     ...baseParsed,
-    modelName: baseParsed.modelName || inheritedModel,
+    modelName: nextModel,
+    contextLimit: nextLimit,
     steps,
-    _isInheritedModel: true,
+    _isInheritedModel: Boolean(
+      (!baseParsed.modelName && inheritedModel) || needsStepStamp || !baseParsed.contextLimit && inheritedLimit,
+    ),
     _baseUninherited: baseParsed._baseUninherited || baseParsed,
   };
 }
@@ -2122,7 +2227,7 @@ export class TranscriptIndex {
           applyDefaultModel: false,
         });
         resultByConvId.set(conv.conversationId, parsed);
-        if (!parsed.modelName || parsed._isInheritedModel) {
+        if (!parsed.modelName || !parsed.contextLimit || parsed._isInheritedModel) {
           needsCrossConvResolution = true;
         }
       }
@@ -2175,9 +2280,10 @@ export class TranscriptIndex {
       }
     }
 
-    // Index peer intrinsic models by geminiDir, side, and global fallback
+    // Index peer intrinsic models & context limits by geminiDir, side, and global fallback
     const modelByGeminiDir = new Map();
     const modelBySide = new Map();
+    const limitByGeminiDir = new Map();
     let anyIntrinsicModel = '';
 
     if (Array.isArray(conversations)) {
@@ -2185,6 +2291,10 @@ export class TranscriptIndex {
         if (!conv?.conversationId) continue;
         const p = resultByConvId.get(conv.conversationId);
         const base = p?._baseUninherited || p;
+        const lim = base?.contextLimit || conv.defaultContextLimit || null;
+        if (lim && conv.geminiDir && !limitByGeminiDir.has(conv.geminiDir)) {
+          limitByGeminiDir.set(conv.geminiDir, { limit: lim, mtimeMs: conv.mtimeMs || 0 });
+        }
         const m = base?.modelName || canonicalizeModelName(conv.defaultModelRaw || '');
         if (!m) continue;
         if (!anyIntrinsicModel) anyIntrinsicModel = m;
@@ -2196,6 +2306,31 @@ export class TranscriptIndex {
         }
       }
     }
+
+    const lookupInheritedContextLimit = (targetCid) => {
+      let cursor = targetCid;
+      const visited = new Set([targetCid]);
+      while (parentOf.has(cursor)) {
+        const pid = parentOf.get(cursor);
+        if (!pid || visited.has(pid)) break;
+        visited.add(pid);
+        const pParsed = resultByConvId.get(pid);
+        const pBase = pParsed?._baseUninherited || pParsed;
+        if (pBase?.contextLimit) return pBase.contextLimit;
+        const pConv = convById.get(pid);
+        if (pConv?.defaultContextLimit) return pConv.defaultContextLimit;
+        cursor = pid;
+      }
+      const conv = convById.get(targetCid);
+      if (conv?.defaultContextLimit) return conv.defaultContextLimit;
+      if (conv?.geminiDir && limitByGeminiDir.has(conv.geminiDir)) {
+        const peer = limitByGeminiDir.get(conv.geminiDir);
+        if ((conv.mtimeMs || 0) >= peer.mtimeMs - 60_000) {
+          return peer.limit;
+        }
+      }
+      return null;
+    };
 
     const lookupIntrinsicOrSpawnModel = (targetCid) => {
       // 1. Explicit child model passed in parent's `swarm` / `invoke_subagent`
@@ -2256,19 +2391,23 @@ export class TranscriptIndex {
 
     for (const [cid, currentParsed] of resultByConvId.entries()) {
       const baseParsed = currentParsed._baseUninherited || currentParsed;
-      if (baseParsed.modelName && !baseParsed.steps.some((s) => !s.modelName)) {
+      const needsModel = !baseParsed.modelName || baseParsed.steps.some((s) => !s.modelName);
+      const needsLimit = !baseParsed.contextLimit;
+      if (!needsModel && !needsLimit) {
         continue;
       }
-      const inherited = lookupIntrinsicOrSpawnModel(cid);
-      if (!inherited) continue;
+      const inheritedModel = needsModel ? lookupIntrinsicOrSpawnModel(cid) : '';
+      const inheritedLimit = needsLimit ? lookupInheritedContextLimit(cid) : null;
+      if (!inheritedModel && !inheritedLimit) continue;
       if (
         currentParsed._isInheritedModel &&
-        currentParsed.modelName === inherited &&
+        currentParsed.modelName === (baseParsed.modelName || inheritedModel) &&
+        currentParsed.contextLimit === (baseParsed.contextLimit || inheritedLimit) &&
         !currentParsed.steps.some((s) => !s.modelName)
       ) {
         continue;
       }
-      const stamped = stampInheritedModel(baseParsed, inherited);
+      const stamped = stampInheritedMetadata(baseParsed, inheritedModel, inheritedLimit);
       resultByConvId.set(cid, stamped);
       const conv = convById.get(cid);
       if (conv?.transcriptPath) {

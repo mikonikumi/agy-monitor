@@ -78,6 +78,60 @@ function normalizeDedupKey(dirPath) {
 }
 
 /**
+ * Parses a context window limit value (e.g. `512000`, `"512K"`, `"900k"`, `"1M"`, `"512,000"`)
+ * into a positive integer token limit in `[16_000, 10_000_000]`, or returns `null`.
+ * @param {unknown} raw
+ * @returns {number | null}
+ */
+export function parseContextLimitValue(raw) {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const rounded = Math.round(raw);
+    return rounded >= 16_000 && rounded <= 10_000_000 ? rounded : null;
+  }
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.trim().replace(/[,_]/g, '');
+  if (!cleaned) return null;
+  const m = cleaned.match(/^(\d+(?:\.\d+)?)\s*([km])?$/i);
+  if (!m) return null;
+  const base = Number(m[1]);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  const unit = (m[2] || '').toLowerCase();
+  const mult = unit === 'm' ? 1_000_000 : unit === 'k' ? 1_000 : 1;
+  const tokens = Math.round(base * mult);
+  return tokens >= 16_000 && tokens <= 10_000_000 ? tokens : null;
+}
+
+/**
+ * Reads configured `contextWindow` from CLI/client `settings.json` or `config/config.json` if present.
+ */
+function readInstallationContextLimit(rootDir, geminiDir) {
+  const candidates = [];
+  if (rootDir) {
+    candidates.push(path.join(rootDir, 'settings.json'));
+  }
+  if (geminiDir) {
+    candidates.push(path.join(geminiDir, 'config', 'config.json'));
+  }
+  for (const cfgPath of candidates) {
+    try {
+      if (!isFileSafe(cfgPath)) continue;
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      const rawVal =
+        parsed?.contextWindow ??
+        parsed?.context_window ??
+        parsed?.contextLimit ??
+        parsed?.userSettings?.contextWindow ??
+        parsed?.userSettings?.context_window;
+      const limit = parseContextLimitValue(rawVal);
+      if (limit) return limit;
+    } catch {
+      // Ignore unreadable or malformed config file
+    }
+  }
+  return null;
+}
+
+/**
  * Reads `last_selected_agent_model` from `antigravity_state.pbtxt` / `jetski_state.pbtxt` if present.
  */
 function readInstallationDefaultModel(rootDir, geminiDir) {
@@ -167,6 +221,7 @@ function collectAppRootsFromGeminiDir(geminiDir, side, localSide, outSources, se
     const dbPath = path.join(rootDir, 'conversation_summaries.db');
     const isLocalSide = side === localSide;
     const defaultModelRaw = readInstallationDefaultModel(rootDir, geminiDir);
+    const defaultContextLimit = readInstallationContextLimit(rootDir, geminiDir);
 
     outSources.push({
       rootDir,
@@ -181,6 +236,7 @@ function collectAppRootsFromGeminiDir(geminiDir, side, localSide, outSources, se
       surface: formatSurfaceLabel(appKind, side),
       isLocalSide,
       defaultModelRaw,
+      defaultContextLimit,
     });
   }
 }
@@ -240,6 +296,7 @@ function collectExtraRoot(extraItem, localSide, outSources, seenRoots) {
   const isLocalSide =
     typeof rawObj.isLocalSide === 'boolean' ? rawObj.isLocalSide : side === localSide;
   const defaultModelRaw = readInstallationDefaultModel(targetPath, geminiDir);
+  const defaultContextLimit = readInstallationContextLimit(targetPath, geminiDir);
 
   outSources.push({
     rootDir: targetPath,
@@ -254,6 +311,7 @@ function collectExtraRoot(extraItem, localSide, outSources, seenRoots) {
     surface: rawObj.surface || formatSurfaceLabel(appKind, side),
     isLocalSide,
     defaultModelRaw,
+    defaultContextLimit,
   });
 }
 
@@ -487,6 +545,7 @@ export function discoverConversations(options = {}) {
         trajectoryDbMtimeMs: trajInfo ? trajInfo.trajectoryDbMtimeMs : 0,
         trajectoryDbSize: trajInfo ? trajInfo.trajectoryDbSize : 0,
         defaultModelRaw: source.defaultModelRaw || '',
+        defaultContextLimit: source.defaultContextLimit || null,
         appName: source.appName,
         appKind: source.appKind,
         side: source.side,

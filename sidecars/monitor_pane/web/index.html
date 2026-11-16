@@ -271,11 +271,11 @@
             </div>
           </section>
 
-          <!-- 256K Anchored Context Window Breakdown -->
-          <section class="card context-window-card" id="context-window-card" aria-label="256K 上下文窗口拆解">
+          <!-- Dynamic Context Window Breakdown -->
+          <section class="card context-window-card" id="context-window-card" aria-label="上下文窗口拆解">
             <div class="card-head window-head">
               <div class="window-title-group">
-                <span class="card-label" id="context-window-label">上下文窗口构成（仅主会话 · 锚定 256K）</span>
+                <span class="card-label" id="context-window-label">上下文窗口构成（仅主会话）</span>
                 <div class="methodology-wrap">
                   <button type="button" id="btn-methodology" class="info-chip" aria-expanded="false" aria-controls="methodology-note">
                     口径说明 ?
@@ -284,21 +284,21 @@
               </div>
               <div class="window-readout">
                 <strong id="window-used-pct" class="window-pct">已使用 0.0%</strong>
-                <span id="window-used-fraction" class="window-fraction">0 / 256k</span>
+                <span id="window-used-fraction" class="window-fraction">0 / —</span>
               </div>
             </div>
 
             <div id="methodology-note" class="methodology-note" hidden>
               <strong>底座锁死 + Step Delta 守恒归因：</strong>
-              总占用 100% 锚定当前压缩周期最新模型步骤的官方 <code>input + cache_read + output</code>（绝不混入子智能体窗口）。固定分母为 <code>256,000</code> Token，其中右侧 <code>250K–256K</code> 为实测自动压缩触发警戒带（<code>Autocompact buffer ~6K</code>）。静态底座四子项与单步并行工具切分采用字符权重（CJK 0.65 / ASCII 0.25）守恒分摊，六大分类之和恒等于真实上下文总量。
+              总占用 100% 锚定当前压缩周期最新模型步骤的官方 <code>input + cache_read + output</code>（绝不混入子智能体窗口）。分母自动检测当前会话真实窗口上限，右侧预留自动压缩触发警戒带（<code>Autocompact buffer</code>）。静态底座四子项与单步并行工具切分采用字符权重（CJK 0.65 / ASCII 0.25）守恒分摊，六大分类之和恒等于真实上下文总量。
             </div>
 
-            <!-- Multi-color 256K segmented progress bar -->
+            <!-- Multi-color segmented progress bar -->
             <div class="context-bar-outer">
-              <div id="context-progress-bar" class="context-progress-bar" role="img" aria-label="256K 上下文分段占用条"></div>
+              <div id="context-progress-bar" class="context-progress-bar" role="img" aria-label="上下文分段占用条"></div>
               <div class="context-threshold-marks" aria-hidden="true">
-                <span id="threshold-mark-80" class="threshold-mark mark-80" style="left: 80%" title="80% 预警线 (204.8k)">80%</span>
-                <span id="threshold-mark-92" class="threshold-mark mark-92" style="left: 92%" title="92% 临近压缩高危线 (235.5k)">92%</span>
+                <span id="threshold-mark-80" class="threshold-mark mark-80" style="left: 80%" title="80% 预警线">80%</span>
+                <span id="threshold-mark-92" class="threshold-mark mark-92" style="left: 92%" title="92% 临近压缩高危线">92%</span>
               </div>
             </div>
 
@@ -345,7 +345,7 @@
               <div class="setting-copy">
                 <label id="chat-alert-label" for="chat-alert-switch" class="setting-title">聊天内临近压缩提醒</label>
                 <p id="chat-alert-desc" class="setting-desc">
-                  开启后，当单会话上下文首次突破 <code>80% (204.8k)</code> 或 <code>92% (235.5k)</code> 时，在下一轮回复中自动附带压缩预警与面板打开链接。
+                  开启后，当单会话上下文首次突破 <code>80%</code> 或 <code>92%</code> 时，在下一轮回复中自动附带压缩预警与面板打开链接。
                 </p>
               </div>
               <div class="switch-wrap">

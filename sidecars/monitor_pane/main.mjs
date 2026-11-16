@@ -48,6 +48,7 @@ import {
   AUTOCOMPACT_BUFFER,
   computeContextBreakdown,
   CONTEXT_LIMIT,
+  resolveContextWindowCapacity,
   SAFE_LIMIT,
   scanWorkspaceAndGlobalCustomizations,
 } from './lib/context_breakdown.mjs';
@@ -677,7 +678,8 @@ export function createMonitorEngine(options = {}) {
     const convFingerprintParts = conversations.map((c) => {
       const p = parsedByConvId.get(c.conversationId);
       const childCount = p?.metadataHints?.spawnedChildren?.length || 0;
-      return `${c.conversationId}:${c.surface}:${c.mtimeMs}:${c.size}:${p?.nextOffset ?? 0}:${childCount}:${p?.modelName || ''}`;
+      const effLim = p?.contextLimit || c?.defaultContextLimit || 0;
+      return `${c.conversationId}:${c.surface}:${c.mtimeMs}:${c.size}:${p?.nextOffset ?? 0}:${childCount}:${p?.modelName || ''}:${effLim}`;
     });
 
     const hierarchyKey = shortHash(
@@ -777,26 +779,21 @@ export function createMonitorEngine(options = {}) {
 
     const record = targetConvId ? hierarchy.byId.get(targetConvId) || null : null;
     const parsed = targetConvId ? parsedByConvId.get(targetConvId) || null : null;
+    const convEntry = targetConvId
+      ? conversations.find((c) => c.conversationId === targetConvId) || null
+      : null;
     const fallbackGlobalModel =
       hierarchy.records.map((r) => canonicalizeModelName(r?.modelName)).find(Boolean) ||
       conversations.map((c) => canonicalizeModelName(c?.defaultModelRaw)).find(Boolean) ||
       '';
-
-    const enrichSubagentItem = (sub) => {
-      const subId = sub?.conversationId || '';
-      const subParsed = subId ? parsedByConvId.get(subId) : null;
-      const selfContextTokens = Math.max(0, Number(sub?.selfContextTokens) || 0);
-      return {
-        ...sub,
-        modelName: resolveCleanModel(sub?.modelName, subParsed?.modelName, fallbackGlobalModel),
-        contextUsedPercent: Number(((selfContextTokens / CONTEXT_LIMIT) * 100).toFixed(1)),
-        checkpointCount: subParsed?.checkpoints?.count || 0,
-        requestCount: subParsed?.totals?.requestCount || 0,
-      };
-    };
+    const fallbackGlobalContextLimit =
+      conversations
+        .map((c) => parsedByConvId.get(c.conversationId)?.contextLimit || c?.defaultContextLimit)
+        .find(Boolean) || CONTEXT_LIMIT;
 
     if (!record || !parsed) {
       const emptyWindow = buildEmptyContextWindow();
+      const emptyCap = resolveContextWindowCapacity(fallbackGlobalContextLimit);
       const emptyPayload = {
         unchanged: false,
         etag,
@@ -834,12 +831,12 @@ export function createMonitorEngine(options = {}) {
         },
         checkpoints: { count: 0, latest: null, items: [] },
         contextWindow: {
-          limit: CONTEXT_LIMIT,
-          autocompactBuffer: AUTOCOMPACT_BUFFER,
-          safeLimit: SAFE_LIMIT,
+          limit: emptyCap.limit,
+          autocompactBuffer: emptyCap.autocompactBuffer,
+          safeLimit: emptyCap.safeLimit,
           usedTokens: 0,
           usedPercent: 0,
-          freeTokens: SAFE_LIMIT,
+          freeTokens: emptyCap.safeLimit,
           alertLevel: 'normal',
           categories: emptyWindow.categories,
           deferred: emptyWindow.deferred,
@@ -851,7 +848,6 @@ export function createMonitorEngine(options = {}) {
       return { etag, payload: emptyPayload };
     }
 
-    const convEntry = conversations.find((c) => c.conversationId === targetConvId);
     const customizations = getCachedCustomizations(
       record.workspace,
       convEntry?.geminiDir || '',
@@ -861,8 +857,29 @@ export function createMonitorEngine(options = {}) {
       steps: parsed.steps,
       workspacePath: record.workspace,
       geminiDir: convEntry?.geminiDir || undefined,
+      contextLimit: parsed.contextLimit || convEntry?.defaultContextLimit || undefined,
       options: { customizations },
     });
+
+    const enrichSubagentItem = (sub) => {
+      const subId = sub?.conversationId || '';
+      const subParsed = subId ? parsedByConvId.get(subId) : null;
+      const subConv = subId ? conversations.find((c) => c.conversationId === subId) : null;
+      const selfContextTokens = Math.max(0, Number(sub?.selfContextTokens) || 0);
+      const subLimit =
+        subParsed?.contextLimit ||
+        subConv?.defaultContextLimit ||
+        rawContextWindow.limit ||
+        CONTEXT_LIMIT;
+      return {
+        ...sub,
+        modelName: resolveCleanModel(sub?.modelName, subParsed?.modelName, fallbackGlobalModel),
+        contextLimit: subLimit,
+        contextUsedPercent: Number(((selfContextTokens / subLimit) * 100).toFixed(1)),
+        checkpointCount: subParsed?.checkpoints?.count || 0,
+        requestCount: subParsed?.totals?.requestCount || 0,
+      };
+    };
 
     const enrichedMcpDrawer = Array.isArray(rawContextWindow.drawers?.mcp)
       ? rawContextWindow.drawers.mcp.map((item) => ({

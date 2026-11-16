@@ -2,12 +2,12 @@
 
 [简体中文](./README.md)
 
-A small toy plugin built while using Antigravity to check how much of the current chat's `256K` context window is left and where the tokens went. It reads local logs and SQLite files directly, has zero external dependencies, and works right after cloning without `npm install` (supports switching between English and Chinese in the top-right corner).
+A small toy plugin built while using Antigravity to check how much of the current chat's context window (auto-detecting the live `256K` / `512K`+ cap) is left and where the tokens went. It reads local logs and SQLite files directly, has zero external dependencies, and works right after cloning without `npm install` (supports switching between English and Chinese in the top-right corner).
 
 ## Features
 
-- See how much of the current chat's `256K` context window is used, broken down across Rules, System, MCP, Skills, chat messages, and tool outputs, plus which tool steps caused big jumps.
-- When running Subagents or Swarm workers, view combined token usage alongside each subagent's own isolated `256K` window share, and click any subagent row to inspect its breakdown and hop between siblings.
+- Automatically detect the current chat's real context window cap (e.g. `256K` / `512K`), broken down across Rules, System, MCP, Skills, chat messages, and tool outputs, plus which tool steps caused big jumps.
+- When running Subagents or Swarm workers, view combined token usage alongside each subagent's own isolated context window share, and click any subagent row to inspect its breakdown and hop between siblings.
 - Get a heads-up in the next reply (with a quick link to open the pane) when a chat crosses `80%` or `92%` of the auto-compaction line — or turn it off in the pane if you don't want it.
 - Browse global request logs by time range, day, or hour, check per-project rankings, and see the actual underlying model used on each step instead of vague `Auto` labels. If you use both WSL and Windows, records from both sides are merged automatically, and you can pop the dashboard out into a full-width browser tab.
 

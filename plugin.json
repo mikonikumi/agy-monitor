@@ -1,7 +1,7 @@
 {
   "name": "agy-monitor",
   "displayName": "agy-monitor",
-  "description": "Antigravity 256K context breakdown & global token stats / 查看当前对话 256K 上下文占用、压缩提醒与全局 Token 统计的小插件。",
+  "description": "Antigravity context window breakdown & global token stats / 查看当前对话实时上下文窗口占用、压缩提醒与全局 Token 统计的小插件。",
   "version": "0.1.0",
   "logo": "assets/logo.svg"
 }

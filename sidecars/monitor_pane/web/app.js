@@ -97,10 +97,10 @@ const I18N_MESSAGES = {
     'cons.selfName': '主会话',
     'cons.subName': '派生子智能体 / Swarm',
     'cons.subWinBadge': '窗口 {pct}%',
-    'cons.subWinTitle': '该子智能体独立 256K 窗口使用率',
+    'cons.subWinTitle': '该子智能体独立 {cap} 窗口使用率',
     'cons.subCpBadge': '压缩 {count}次',
     'cons.subCpTitle': '该子智能体已触发 CHECKPOINT 自动压缩次数',
-    'cons.subRowTitle': '点击下钻查看该子智能体的 256K 窗口与步骤明细',
+    'cons.subRowTitle': '点击下钻查看该子智能体的 {cap} 窗口与步骤明细',
     'stats.sectionAria': '吞吐与流速详情',
     'stats.inputLabel': '累计新增输入',
     'stats.outputLabel': '累计输出',
@@ -115,16 +115,16 @@ const I18N_MESSAGES = {
     'stats.checkpointNone': '当前尚未触发自动压缩',
     'stats.checkpointReset': '已触发自动上下文压缩重置',
     'stats.checkpointLatest': '最近 #{step}: {before} → {after} ({delta})',
-    'win.sectionAria': '256K 上下文窗口拆解',
-    'win.labelMain': '上下文窗口构成（仅主会话 · 锚定 256K）',
-    'win.labelSubagent': '上下文窗口构成（子智能体 @{role} · 锚定 256K）',
+    'win.sectionAria': '{cap} 上下文窗口拆解',
+    'win.labelMain': '上下文窗口构成（仅主会话 · 锚定 {cap}）',
+    'win.labelSubagent': '上下文窗口构成（子智能体 @{role} · 锚定 {cap}）',
     'win.methodologyBtn': '口径说明 ?',
-    'win.methodologyHtml': '<strong>底座锁死 + Step Delta 守恒归因：</strong>总占用 100% 锚定当前压缩周期最新模型步骤的官方 <code>input + cache_read + output</code>（绝不混入子智能体窗口）。固定分母为 <code>256,000</code> Token，其中右侧 <code>250K–256K</code> 为实测自动压缩触发警戒带（<code>Autocompact buffer ~6K</code>）。静态底座四子项与单步并行工具切分采用字符权重（CJK 0.65 / ASCII 0.25）守恒分摊，六大分类之和恒等于真实上下文总量。',
+    'win.methodologyHtml': '<strong>底座锁死 + Step Delta 守恒归因：</strong>总占用 100% 锚定当前压缩周期最新模型步骤的官方 <code>input + cache_read + output</code>（绝不混入子智能体窗口）。当前检测到窗口上限为 <code>{limitExact}</code> Token，其中右侧 <code>{safeCap}–{cap}</code> 为自动压缩触发警戒带（<code>Autocompact buffer ~{bufCap}</code>）。静态底座四子项与单步并行工具切分采用字符权重（CJK 0.65 / ASCII 0.25）守恒分摊，六大分类之和恒等于真实上下文总量。',
     'win.usedPct': '已使用 {pct}%',
     'win.exactTitle': '精确占用：{used} / {limit} tokens',
-    'win.barAria': '256K 上下文分段占用条',
-    'win.mark80Title': '80% 预警线 (204.8k)',
-    'win.mark92Title': '92% 临近压缩高危线 (235.5k)',
+    'win.barAria': '{cap} 上下文分段占用条',
+    'win.mark80Title': '80% 预警线 ({warnTok})',
+    'win.mark92Title': '92% 临近压缩高危线 ({critTok})',
     'win.catListAria': '六大活跃上下文分类',
     'win.catExactTitle': '精确 Token: {exact}',
     'win.bufferLabel': 'Autocompact buffer 警戒带',
@@ -139,7 +139,7 @@ const I18N_MESSAGES = {
     'win.deferredSkills': '未激活 Skills 正文',
     'alert.sectionAria': '聊天内临近压缩提醒设置',
     'alert.title': '聊天内临近压缩提醒',
-    'alert.descHtml': '开启后，当单会话上下文首次突破 <code>80% (204.8k)</code> 或 <code>92% (235.5k)</code> 时，在下一轮回复中自动附带压缩预警与面板打开链接。',
+    'alert.descHtml': '开启后，当单会话上下文首次突破 <code>80% ({warnTok})</code> 或 <code>92% ({critTok})</code> 时，在下一轮回复中自动附带压缩预警与面板打开链接。',
     'alert.savedOn': '已保存：上下文突破 80% / 92% 时将在下一轮回复中自动附带压缩预警与面板链接',
     'alert.savedOff': '已保存：聊天内临近压缩提醒已关闭，仅在监控面板内部高亮',
     'alert.demoSuffix': '（预览模式）',
@@ -250,7 +250,7 @@ const I18N_MESSAGES = {
     'toast.fsBarShown': '已展开全屏总控地址栏，可点击「新窗口打开」访问',
     'toast.urlCopied': '已复制全屏总控链接',
     'toast.urlManualCopy': '请选中输入框手动复制链接',
-    'toast.drilledSubRole': '已下钻查看子智能体 @{role} 的 256K 窗口与明细',
+    'toast.drilledSubRole': '已下钻查看子智能体 @{role} 的 {cap} 窗口与明细',
     'toast.drilledSub': '已下钻查看子智能体明细',
     'toast.backToMain': '已返回主会话视图',
     'toast.switchedWorker': '已切换查看 {label}',
@@ -328,10 +328,10 @@ const I18N_MESSAGES = {
     'cons.selfName': 'Main Chat',
     'cons.subName': 'Subagents / Swarm',
     'cons.subWinBadge': 'Win {pct}%',
-    'cons.subWinTitle': 'Subagent independent 256K context window usage',
+    'cons.subWinTitle': 'Subagent independent {cap} context window usage',
     'cons.subCpBadge': 'Compacted {count}x',
     'cons.subCpTitle': 'Auto-compaction checkpoints triggered in this subagent',
-    'cons.subRowTitle': 'Click to inspect this subagent 256K window and step spikes',
+    'cons.subRowTitle': 'Click to inspect this subagent {cap} window and step spikes',
     'stats.sectionAria': 'Throughput and speed metrics',
     'stats.inputLabel': 'Uncached Input',
     'stats.outputLabel': 'Total Output',
@@ -346,16 +346,16 @@ const I18N_MESSAGES = {
     'stats.checkpointNone': 'No auto-compaction yet',
     'stats.checkpointReset': 'Context auto-compacted',
     'stats.checkpointLatest': 'Latest #{step}: {before} → {after} ({delta})',
-    'win.sectionAria': '256K context window breakdown',
-    'win.labelMain': 'Context Window (Main Only · 256K Cap)',
-    'win.labelSubagent': 'Context Window (Subagent @{role} · 256K Cap)',
+    'win.sectionAria': '{cap} context window breakdown',
+    'win.labelMain': 'Context Window (Main Only · {cap} Cap)',
+    'win.labelSubagent': 'Context Window (Subagent @{role} · {cap} Cap)',
     'win.methodologyBtn': 'How it works ?',
-    'win.methodologyHtml': '<strong>Locked Baseline + Step-Delta Conservation:</strong> Total occupancy is 100% anchored to the latest model step’s official <code>input + cache_read + output</code> in the current compaction cycle (subagent windows are never mixed in). The denominator is fixed at <code>256,000</code> tokens, with <code>250K–256K</code> reserved as the empirical auto-compaction trigger zone (<code>Autocompact Buffer ~6K</code>). Static baseline items and parallel tool steps are apportioned by character weights (CJK 0.65 / ASCII 0.25) so all 6 categories strictly sum to the exact context total.',
+    'win.methodologyHtml': '<strong>Locked Baseline + Step-Delta Conservation:</strong> Total occupancy is 100% anchored to the latest model step’s official <code>input + cache_read + output</code> in the current compaction cycle (subagent windows are never mixed in). Detected window cap is <code>{limitExact}</code> tokens, with <code>{safeCap}–{cap}</code> reserved as the auto-compaction trigger zone (<code>Autocompact Buffer ~{bufCap}</code>). Static baseline items and parallel tool steps are apportioned by character weights (CJK 0.65 / ASCII 0.25) so all 6 categories strictly sum to the exact context total.',
     'win.usedPct': 'Used {pct}%',
     'win.exactTitle': 'Exact usage: {used} / {limit} tokens',
-    'win.barAria': '256K segmented context occupancy bar',
-    'win.mark80Title': '80% warning threshold (204.8k)',
-    'win.mark92Title': '92% critical compaction threshold (235.5k)',
+    'win.barAria': '{cap} segmented context occupancy bar',
+    'win.mark80Title': '80% warning threshold ({warnTok})',
+    'win.mark92Title': '92% critical compaction threshold ({critTok})',
     'win.catListAria': 'Six active context categories',
     'win.catExactTitle': 'Exact tokens: {exact}',
     'win.bufferLabel': 'Autocompact Buffer',
@@ -370,7 +370,7 @@ const I18N_MESSAGES = {
     'win.deferredSkills': 'Inactive Skill Bodies',
     'alert.sectionAria': 'Compaction threshold alert settings',
     'alert.title': 'Compaction Threshold Alert',
-    'alert.descHtml': 'When enabled, once a session first crosses <code>80% (204.8k)</code> or <code>92% (235.5k)</code>, the next reply includes a brief compaction warning and a quick link to open this monitor.',
+    'alert.descHtml': 'When enabled, once a session first crosses <code>80% ({warnTok})</code> or <code>92% ({critTok})</code>, the next reply includes a brief compaction warning and a quick link to open this monitor.',
     'alert.savedOn': 'Saved: Compaction warning & monitor link will be included on the next reply after crossing 80% / 92%',
     'alert.savedOff': 'Saved: In-chat compaction alert disabled (highlighted inside monitor pane only)',
     'alert.demoSuffix': ' (Demo)',
@@ -481,7 +481,7 @@ const I18N_MESSAGES = {
     'toast.fsBarShown': 'Fullscreen URL bar shown — click "Open in New Tab" to launch',
     'toast.urlCopied': 'Copied fullscreen URL',
     'toast.urlManualCopy': 'Select the URL input to copy manually',
-    'toast.drilledSubRole': 'Inspecting subagent @{role} 256K window & details',
+    'toast.drilledSubRole': 'Inspecting subagent @{role} {cap} window & details',
     'toast.drilledSub': 'Inspecting subagent details',
     'toast.backToMain': 'Returned to main conversation view',
     'toast.switchedWorker': 'Switched to {label}',
@@ -672,6 +672,33 @@ export function formatTokensEn(value) {
     return `${sign}${trimDecimals((abs / 1_000).toFixed(1))}k`;
   }
   return `${sign}${Math.round(abs)}`;
+}
+
+/**
+ * Formats a context window limit badge with uppercase K / M suffix (e.g. 256K, 512K, 900K, 1M).
+ */
+export function formatWindowCap(value) {
+  return formatTokensEn(value).replace(/k$/, 'K');
+}
+
+function buildWindowI18nParams(
+  limit = CONTEXT_LIMIT,
+  autocompactBuffer = AUTOCOMPACT_BUFFER,
+  safeLimit,
+) {
+  const lim = Number(limit) > 0 ? Math.round(Number(limit)) : CONTEXT_LIMIT;
+  const buf = Number.isFinite(Number(autocompactBuffer))
+    ? Math.max(0, Math.round(Number(autocompactBuffer)))
+    : AUTOCOMPACT_BUFFER;
+  const safe = Number(safeLimit) > 0 ? Math.round(Number(safeLimit)) : Math.max(0, lim - buf);
+  return {
+    cap: formatWindowCap(lim),
+    limitExact: formatExactInt(lim),
+    safeCap: formatWindowCap(safe),
+    bufCap: formatWindowCap(buf),
+    warnTok: formatTokensEn(Math.round(lim * 0.8)),
+    critTok: formatTokensEn(Math.round(lim * 0.92)),
+  };
 }
 
 /**
@@ -962,9 +989,11 @@ export function computeContextBarModel(contextWindow = {}, { locale = currentLoc
   const bufferWidthPct = barDenom > 0 ? (bufferTokensVisible / barDenom) * 100 : 0;
 
   const rawAlert = String(contextWindow?.alertLevel || '').toLowerCase();
+  const critThreshold = Math.round(limit * 0.92);
+  const warnThreshold = Math.round(limit * 0.8);
   let alertState = 'ok';
   if (
-    usedTokens >= ALERT_CRITICAL_TOKENS ||
+    usedTokens >= critThreshold ||
     rawAlert === 'critical' ||
     rawAlert === 'danger' ||
     rawAlert === 'high' ||
@@ -972,7 +1001,7 @@ export function computeContextBarModel(contextWindow = {}, { locale = currentLoc
   ) {
     alertState = 'critical';
   } else if (
-    usedTokens >= ALERT_WARN_TOKENS ||
+    usedTokens >= warnThreshold ||
     rawAlert === 'warn' ||
     rawAlert === 'warning' ||
     rawAlert.includes('80')
@@ -2370,12 +2399,19 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
     setAttr('btn-open-subagent-host', 'title', t('drill.openHostTitle', null, loc));
     setAttr('conv-sibling-pills', 'aria-label', t('drill.siblingsAria', null, loc));
 
+    const activeWin = state.convData?.contextWindow;
+    const winParams = buildWindowI18nParams(
+      activeWin?.limit,
+      activeWin?.autocompactBuffer,
+      activeWin?.safeLimit,
+    );
+
     setAttr('session-meta-card', 'aria-label', t('meta.sectionAria', null, loc));
     if (!state.convData) {
       setTxt('conv-title', t('meta.loadingConv', null, loc));
       setTxt('conv-alert-pill', t('meta.alertHealthy', null, loc));
       setTxt('conv-subagent-count-pill', t('cons.noSubagents', null, loc));
-      setTxt('context-window-label', t('win.labelMain', null, loc));
+      setTxt('context-window-label', t('win.labelMain', winParams, loc));
       setTxt('window-used-pct', t('win.usedPct', { pct: '0.0' }, loc));
       setTxt('stat-last-duration', t('stats.latestDuration', { val: '—' }, loc));
       setTxt('stat-checkpoint-count', t('stats.checkpointCount', { count: 0 }, loc));
@@ -2408,13 +2444,13 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
     setTxt('tile-label-checkpoint', t('stats.checkpointLabel', null, loc));
     setTxt('stat-checkpoint-badge', t('stats.checkpointBadge', null, loc));
 
-    setAttr('context-window-card', 'aria-label', t('win.sectionAria', null, loc));
+    setAttr('context-window-card', 'aria-label', t('win.sectionAria', winParams, loc));
     setTxt('btn-methodology', t('win.methodologyBtn', null, loc));
     const methNote = $('methodology-note');
-    if (methNote) methNote.innerHTML = t('win.methodologyHtml', null, loc);
-    setAttr('context-progress-bar', 'aria-label', t('win.barAria', null, loc));
-    setAttr('threshold-mark-80', 'title', t('win.mark80Title', null, loc));
-    setAttr('threshold-mark-92', 'title', t('win.mark92Title', null, loc));
+    if (methNote) methNote.innerHTML = t('win.methodologyHtml', winParams, loc);
+    setAttr('context-progress-bar', 'aria-label', t('win.barAria', winParams, loc));
+    setAttr('threshold-mark-80', 'title', t('win.mark80Title', winParams, loc));
+    setAttr('threshold-mark-92', 'title', t('win.mark92Title', winParams, loc));
     setAttr('context-categories-list', 'aria-label', t('win.catListAria', null, loc));
     setTxt('bf-label-buffer', t('win.bufferLabel', null, loc));
     setTxt('bf-label-free', t('win.freeLabel', null, loc));
@@ -2426,7 +2462,7 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
     setAttr('alert-toggle-card', 'aria-label', t('alert.sectionAria', null, loc));
     setTxt('chat-alert-label', t('alert.title', null, loc));
     const alertDesc = $('chat-alert-desc');
-    if (alertDesc) alertDesc.innerHTML = t('alert.descHtml', null, loc);
+    if (alertDesc) alertDesc.innerHTML = t('alert.descHtml', winParams, loc);
 
     setAttr('drawers-section', 'aria-label', t('drawers.sectionAria', null, loc));
     setTxt('drawer-rules-title', t('drawers.rulesTitle', null, loc));
@@ -3133,12 +3169,27 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       }
     }
 
+    const barModel = computeContextBarModel(data.contextWindow, { locale: loc });
+    const winParams = buildWindowI18nParams(
+      barModel.limit,
+      barModel.autocompactBuffer,
+      barModel.safeLimit,
+    );
+
     const ctxLabelEl = $('context-window-label');
     if (ctxLabelEl) {
       ctxLabelEl.textContent = isSubagent
-        ? t('win.labelSubagent', { role: currentRoleLabel }, loc)
-        : t('win.labelMain', null, loc);
+        ? t('win.labelSubagent', { role: currentRoleLabel, cap: winParams.cap }, loc)
+        : t('win.labelMain', winParams, loc);
     }
+    setAttr('context-window-card', 'aria-label', t('win.sectionAria', winParams, loc));
+    const methNoteEl = $('methodology-note');
+    if (methNoteEl) methNoteEl.innerHTML = t('win.methodologyHtml', winParams, loc);
+    setAttr('context-progress-bar', 'aria-label', t('win.barAria', winParams, loc));
+    setAttr('threshold-mark-80', 'title', t('win.mark80Title', winParams, loc));
+    setAttr('threshold-mark-92', 'title', t('win.mark92Title', winParams, loc));
+    const alertDescEl = $('chat-alert-desc');
+    if (alertDescEl) alertDescEl.innerHTML = t('alert.descHtml', winParams, loc);
 
     const convTitleText = localizeSessionTitle(data.title, {
       fallbackZh: data.conversationId || '当前活跃会话',
@@ -3236,13 +3287,16 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
         }
       } else {
         subListEl.hidden = false;
-        const winTip = t('cons.subWinTitle', null, loc);
         const cpTip = t('cons.subCpTitle', null, loc);
-        const rowTip = t('cons.subRowTitle', null, loc);
         const subHtml = subagents
           .map((sub) => {
             const subId = String(sub.conversationId || '').trim();
             const roleLabel = formatSubagentRole(sub.role);
+            const subLimit =
+              Number(sub.contextLimit) > 0 ? Number(sub.contextLimit) : barModel.limit;
+            const subCap = formatWindowCap(subLimit);
+            const winTip = t('cons.subWinTitle', { cap: subCap }, loc);
+            const rowTip = t('cons.subRowTitle', { cap: subCap }, loc);
             const displayTitle = formatSubagentTitle(sub.title, sub.role, subId, loc);
             const rawTipTitle = localizeSessionTitle(sub.title, {
               fallbackZh: subId,
@@ -3258,7 +3312,7 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
             const ctxPct = Number.isFinite(rawCtxPct)
               ? Math.max(0, rawCtxPct)
               : (Number.isFinite(Number(sub.selfContextTokens))
-                  ? Number(((Math.max(0, Number(sub.selfContextTokens)) / CONTEXT_LIMIT) * 100).toFixed(1))
+                  ? Number(((Math.max(0, Number(sub.selfContextTokens)) / subLimit) * 100).toFixed(1))
                   : null);
             const ctxToneClass = ctxPct === null
               ? 'pill-subtle'
@@ -3276,7 +3330,7 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
               : '';
 
             return (
-              `<button type="button" class="subagent-row subagent-row-btn" data-subagent-id="${escapeHtml(subId)}" data-subagent-role="${escapeHtml(roleLabel)}" style="--sub-share:${shareClamped.toFixed(1)}%" title="${escapeHtml(rowTip)}">` +
+              `<button type="button" class="subagent-row subagent-row-btn" data-subagent-id="${escapeHtml(subId)}" data-subagent-role="${escapeHtml(roleLabel)}" data-subagent-cap="${escapeHtml(subCap)}" style="--sub-share:${shareClamped.toFixed(1)}%" title="${escapeHtml(rowTip)}">` +
               `<span class="subagent-name">` +
               `<span class="pill pill-role">@${escapeHtml(roleLabel)}</span>` +
               `<span class="subagent-title-text" title="${escapeHtml(rawTipTitle)}">${escapeHtml(displayTitle)}</span>` +
@@ -3355,8 +3409,7 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       );
     }
 
-    // 256K Context Window Bar & 6 Categories
-    const barModel = computeContextBarModel(data.contextWindow, { locale: loc });
+    // Detected Context Window Bar & 6 Categories
     const windowCard = $('context-window-card');
     if (windowCard) windowCard.dataset.alert = barModel.alertState;
 
@@ -4542,15 +4595,19 @@ export function bootMonitorApp(win = globalThis.window, doc = globalThis.documen
       return;
     }
 
-    // Subagent row click -> drill directly into child conversation's 256K window & drawers
+    // Subagent row click -> drill directly into child conversation's window & drawers
     const subRowBtn = target.closest('.subagent-row-btn[data-subagent-id]');
     if (subRowBtn) {
       const subId = subRowBtn.getAttribute('data-subagent-id') || subRowBtn.dataset?.subagentId || '';
       const subRole = subRowBtn.getAttribute('data-subagent-role') || subRowBtn.dataset?.subagentRole || '';
+      const subCap =
+        subRowBtn.getAttribute('data-subagent-cap') ||
+        subRowBtn.dataset?.subagentCap ||
+        formatWindowCap(state.convData?.contextWindow?.limit || CONTEXT_LIMIT);
       if (subId) {
         inspectSubagentConversation(subId, {
           toastMsg: subRole
-            ? t('toast.drilledSubRole', { role: subRole }, state.locale)
+            ? t('toast.drilledSubRole', { role: subRole, cap: subCap }, state.locale)
             : t('toast.drilledSub', null, state.locale),
         });
       }

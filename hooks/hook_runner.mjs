@@ -9,6 +9,8 @@ import {
   readSettings,
   updateConversationAlertState,
 } from '../sidecars/monitor_pane/lib/state_store.mjs';
+import { parseContextLimitValue } from '../sidecars/monitor_pane/lib/discovery.mjs';
+import { parseExecutorMetadataContextLimit } from '../sidecars/monitor_pane/lib/transcript_parser.mjs';
 
 export const CONTEXT_LIMIT = 256_000;
 export const THRESHOLD_80 = 204_800;
@@ -445,7 +447,7 @@ function inspectTranscriptHeadTrigger(transcriptPath) {
   }
 }
 
-function resolveSiblingSummariesDbPath(transcriptPath, convId) {
+function resolveBrainAppRoot(transcriptPath, convId) {
   if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) return null;
   const resolved = path.resolve(transcriptPath);
   const norm = resolved.replace(/\\/g, '/');
@@ -463,9 +465,78 @@ function resolveSiblingSummariesDbPath(transcriptPath, convId) {
     }
   }
 
-  if (!brainDir) return null;
-  const dbPath = path.join(path.dirname(brainDir), 'conversation_summaries.db');
+  return brainDir ? path.dirname(brainDir) : null;
+}
+
+function resolveSiblingSummariesDbPath(transcriptPath, convId) {
+  const appRoot = resolveBrainAppRoot(transcriptPath, convId);
+  if (!appRoot) return null;
+  const dbPath = path.join(appRoot, 'conversation_summaries.db');
   return isExistingFile(dbPath) ? dbPath : null;
+}
+
+export function resolveHookContextLimit(transcriptPath, convId, options = {}) {
+  const explicit = parseContextLimitValue(options?.contextLimit);
+  if (explicit) return explicit;
+
+  const appRoot = resolveBrainAppRoot(transcriptPath, convId);
+  if (appRoot && convId && !/[/\\]|\.\./.test(convId)) {
+    const dbCandidates = [path.join(appRoot, 'conversations', `${convId}.db`)];
+    if (path.basename(appRoot) !== 'antigravity') {
+      dbCandidates.push(path.join(path.dirname(appRoot), 'antigravity', 'conversations', `${convId}.db`));
+    }
+    const DatabaseSync = process.getBuiltinModule?.('node:sqlite')?.DatabaseSync;
+    if (typeof DatabaseSync === 'function') {
+      for (const trajDbPath of dbCandidates) {
+        if (!isExistingFile(trajDbPath)) continue;
+        let db = null;
+        try {
+          db = new DatabaseSync(trajDbPath, { open: true, readOnly: true });
+          const tbl = db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'executor_metadata'")
+            .get();
+          if (tbl) {
+            const row = db
+              .prepare('SELECT data FROM executor_metadata ORDER BY idx DESC LIMIT 1')
+              .get();
+            const detected = parseExecutorMetadataContextLimit(row?.data);
+            if (detected) return detected;
+          }
+        } catch {
+          // Ignore unreadable DB and try fallback
+        } finally {
+          try {
+            db?.close();
+          } catch {
+            // Ignore close error
+          }
+        }
+      }
+    }
+
+    const cfgCandidates = [
+      path.join(appRoot, 'settings.json'),
+      path.join(path.dirname(appRoot), 'config', 'config.json'),
+    ];
+    for (const cfgPath of cfgCandidates) {
+      if (!isExistingFile(cfgPath)) continue;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        const lim = parseContextLimitValue(
+          parsed?.contextWindow ??
+            parsed?.context_window ??
+            parsed?.contextLimit ??
+            parsed?.userSettings?.contextWindow ??
+            parsed?.userSettings?.context_window,
+        );
+        if (lim) return lim;
+      } catch {
+        // Ignore malformed config
+      }
+    }
+  }
+
+  return CONTEXT_LIMIT;
 }
 
 function isChildConversationInSummariesDb(transcriptPath, convId) {
@@ -558,18 +629,36 @@ export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapsh
   return false;
 }
 
-export function buildAlertSystemMessage(level, usedTokens, language = 'auto') {
+function formatHookCapTokens(tokens) {
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return `${Number.isInteger(m) ? m : Number(m.toFixed(2))}M`;
+  }
+  const k = tokens / 1_000;
+  return `${Number.isInteger(k) ? k : Number(k.toFixed(1))}k`;
+}
+
+export function buildAlertSystemMessage(
+  level,
+  usedTokens,
+  language = 'auto',
+  contextLimit = CONTEXT_LIMIT,
+) {
+  const limit = parseContextLimitValue(contextLimit) || CONTEXT_LIMIT;
+  const safeTokens = Math.max(0, limit - Math.min(6_000, Math.floor(limit * 0.2)));
+  const capStr = formatHookCapTokens(limit);
+  const safeStr = formatHookCapTokens(safeTokens);
   const usedK = (usedTokens / 1000).toFixed(1);
-  const pct = ((usedTokens / CONTEXT_LIMIT) * 100).toFixed(1);
+  const pct = ((usedTokens / limit) * 100).toFixed(1);
   const lang = normalizeLanguageSetting(language);
   if (lang === 'en') {
     if (level === 92) {
-      return `[agy-monitor] Current session context reached ${usedK}k / 256k (${pct}%), critically close to auto-compaction (~250k)! Please briefly warn the user at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
+      return `[agy-monitor] Current session context reached ${usedK}k / ${capStr} (${pct}%), critically close to auto-compaction (~${safeStr})! Please briefly warn the user at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
     }
-    return `[agy-monitor] Current session context reached ${usedK}k / 256k (${pct}%), approaching auto-compaction (~250k). Please briefly mention this once at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
+    return `[agy-monitor] Current session context reached ${usedK}k / ${capStr} (${pct}%), approaching auto-compaction (~${safeStr}). Please briefly mention this once at the start of your reply and include [Open agy-monitor](sidecar://agy-monitor/monitor_pane/).`;
   }
-  const clause = level === 92 ? '即将触发自动压缩线（~250k）！' : '接近自动压缩线（~250k）。';
-  return `[agy-monitor] 当前会话上下文已占用 ${usedK}k / 256k (${pct}%)，${clause}请在本次回复开头用一句话顺便提醒用户，并附上快捷入口 [打开 agy-monitor](sidecar://agy-monitor/monitor_pane/)。`;
+  const clause = level === 92 ? `即将触发自动压缩线（~${safeStr}）！` : `接近自动压缩线（~${safeStr}）。`;
+  return `[agy-monitor] 当前会话上下文已占用 ${usedK}k / ${capStr} (${pct}%)，${clause}请在本次回复开头用一句话顺便提醒用户，并附上快捷入口 [打开 agy-monitor](sidecar://agy-monitor/monitor_pane/)。`;
 }
 
 function wrapSystemMessageStep(message) {
@@ -667,10 +756,13 @@ export function runHook(rawStdin, options = {}) {
     }
 
     const snapshot = inspectTranscriptTail(transcriptPath, options);
+    const activeLimit = resolveHookContextLimit(transcriptPath, convId, options);
+    const threshold80 = Math.round(activeLimit * 0.8);
+    const threshold92 = Math.round(activeLimit * 0.92);
     const skipAlert =
       enableChatAlert &&
       snapshot.hasPlannerInCycle &&
-      snapshot.usedTokens >= THRESHOLD_80 &&
+      snapshot.usedTokens >= threshold80 &&
       isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot);
 
     let alertLevelToEmit = 0;
@@ -686,18 +778,30 @@ export function runHook(rawStdin, options = {}) {
           snapshot.hasPlannerInCycle &&
           snapshot.usedTokens < COMPACTION_DROP_THRESHOLD &&
           (prev.lastContextTokens || 0) >= COMPACTION_PREV_HIGH_WATER;
+        const upgradedWindowCap =
+          snapshot.hasPlannerInCycle &&
+          (prev.lastContextTokens || 0) > 0 &&
+          (prev.lastContextTokens || 0) < threshold80 &&
+          snapshot.usedTokens < threshold80;
 
-        if (compactedByCheckpoint || compactedByTokenDrop) {
+        if (compactedByCheckpoint || compactedByTokenDrop || upgradedWindowCap) {
           alerted80 = false;
+          alerted92 = false;
+        } else if (
+          alerted92 &&
+          snapshot.hasPlannerInCycle &&
+          (prev.lastContextTokens || 0) < threshold92 &&
+          snapshot.usedTokens < threshold92
+        ) {
           alerted92 = false;
         }
 
         if (enableChatAlert && snapshot.hasPlannerInCycle && !skipAlert) {
-          if (snapshot.usedTokens >= THRESHOLD_92 && !alerted92) {
+          if (snapshot.usedTokens >= threshold92 && !alerted92) {
             alertLevelToEmit = 92;
             alerted92 = true;
             alerted80 = true;
-          } else if (snapshot.usedTokens >= THRESHOLD_80 && !alerted80) {
+          } else if (snapshot.usedTokens >= threshold80 && !alerted80) {
             alertLevelToEmit = 80;
             alerted80 = true;
           }
@@ -722,7 +826,7 @@ export function runHook(rawStdin, options = {}) {
 
     if (alertLevelToEmit === 80 || alertLevelToEmit === 92) {
       return wrapSystemMessageStep(
-        buildAlertSystemMessage(alertLevelToEmit, snapshot.usedTokens, alertLanguage),
+        buildAlertSystemMessage(alertLevelToEmit, snapshot.usedTokens, alertLanguage, activeLimit),
       );
     }
 
