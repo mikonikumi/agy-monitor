@@ -10,7 +10,10 @@ import {
   updateConversationAlertState,
 } from '../sidecars/monitor_pane/lib/state_store.mjs';
 import { parseContextLimitValue } from '../sidecars/monitor_pane/lib/discovery.mjs';
-import { parseExecutorMetadataContextLimit } from '../sidecars/monitor_pane/lib/transcript_parser.mjs';
+import {
+  parseExecutorMetadataContextLimit,
+  parseGenMetadataContextLimit,
+} from '../sidecars/monitor_pane/lib/transcript_parser.mjs';
 
 export const CONTEXT_LIMIT = 256_000;
 export const THRESHOLD_80 = 204_800;
@@ -447,63 +450,108 @@ function inspectTranscriptHeadTrigger(transcriptPath) {
   }
 }
 
-function resolveBrainAppRoot(transcriptPath, convId) {
-  if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) return null;
-  const resolved = path.resolve(transcriptPath);
-  const norm = resolved.replace(/\\/g, '/');
+function openReadOnlySqlite(DatabaseSync, dbPath) {
+  try {
+    return new DatabaseSync(dbPath, { open: true, readOnly: true, timeout: 1500 });
+  } catch {
+    return new DatabaseSync(dbPath, { open: true, readOnly: true });
+  }
+}
 
-  let brainDir = null;
-  if (norm.endsWith('/.system_generated/logs/transcript.jsonl')) {
-    const convDir = path.dirname(path.dirname(path.dirname(resolved)));
-    if (path.basename(path.dirname(convDir)) === 'brain') {
-      brainDir = path.dirname(convDir);
+function resolveBrainAppRoot(targetPath) {
+  if (typeof targetPath !== 'string' || !targetPath.trim()) return null;
+  const resolved = path.resolve(targetPath);
+  const m = resolved.match(/^(.*)[\\/]brain[\\/]([^\\/]+)(?:[\\/]|$)/i);
+  if (m && m[1]) {
+    return m[1];
+  }
+  return null;
+}
+
+function collectHookAppRoots(transcriptPath, options = {}, payload = null) {
+  const seen = new Set();
+  const roots = [];
+  const addRoot = (candidate) => {
+    if (typeof candidate !== 'string' || !candidate.trim()) return;
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    roots.push(resolved);
+    if (path.basename(resolved) !== 'antigravity') {
+      const sibling = path.join(path.dirname(resolved), 'antigravity');
+      if (!seen.has(sibling)) {
+        seen.add(sibling);
+        roots.push(sibling);
+      }
     }
-  } else {
-    const parentDir = path.dirname(resolved);
-    if (convId && path.basename(parentDir) === convId && path.basename(path.dirname(parentDir)) === 'brain') {
-      brainDir = path.dirname(parentDir);
+  };
+
+  addRoot(resolveBrainAppRoot(transcriptPath));
+  addRoot(resolveBrainAppRoot(payload?.artifactDirectoryPath || payload?.artifact_directory_path));
+
+  const homeDir = options?.homeDir || os.homedir();
+  const geminiRoots = [];
+  if (Array.isArray(options?.geminiRoots)) {
+    geminiRoots.push(...options.geminiRoots);
+  }
+  if (typeof homeDir === 'string' && homeDir.trim()) {
+    geminiRoots.push(path.join(homeDir, '.gemini'));
+  }
+  for (const geminiRoot of geminiRoots) {
+    for (const app of CLIENT_APPS) {
+      addRoot(path.join(geminiRoot, app));
     }
   }
 
-  return brainDir ? path.dirname(brainDir) : null;
+  return roots;
 }
 
-function resolveSiblingSummariesDbPath(transcriptPath, convId) {
-  const appRoot = resolveBrainAppRoot(transcriptPath, convId);
-  if (!appRoot) return null;
-  const dbPath = path.join(appRoot, 'conversation_summaries.db');
-  return isExistingFile(dbPath) ? dbPath : null;
+function resolveSiblingSummariesDbPath(transcriptPath, convId, options = {}, payload = null) {
+  for (const appRoot of collectHookAppRoots(transcriptPath, options, payload)) {
+    const dbPath = path.join(appRoot, 'conversation_summaries.db');
+    if (isExistingFile(dbPath)) return dbPath;
+  }
+  return null;
 }
 
-export function resolveHookContextLimit(transcriptPath, convId, options = {}) {
+export function resolveHookContextLimit(transcriptPath, convId, options = {}, payload = null) {
   const explicit = parseContextLimitValue(options?.contextLimit);
   if (explicit) return explicit;
 
-  const appRoot = resolveBrainAppRoot(transcriptPath, convId);
-  if (appRoot && convId && !/[/\\]|\.\./.test(convId)) {
-    const dbCandidates = [path.join(appRoot, 'conversations', `${convId}.db`)];
-    if (path.basename(appRoot) !== 'antigravity') {
-      dbCandidates.push(path.join(path.dirname(appRoot), 'antigravity', 'conversations', `${convId}.db`));
-    }
+  const appRoots = collectHookAppRoots(transcriptPath, options, payload);
+  if (appRoots.length > 0 && convId && !/[/\\]|\.\./.test(convId)) {
     const DatabaseSync = process.getBuiltinModule?.('node:sqlite')?.DatabaseSync;
     if (typeof DatabaseSync === 'function') {
-      for (const trajDbPath of dbCandidates) {
+      for (const appRoot of appRoots) {
+        const trajDbPath = path.join(appRoot, 'conversations', `${convId}.db`);
         if (!isExistingFile(trajDbPath)) continue;
         let db = null;
         try {
-          db = new DatabaseSync(trajDbPath, { open: true, readOnly: true });
-          const tbl = db
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'executor_metadata'")
-            .get();
-          if (tbl) {
-            const row = db
+          db = openReadOnlySqlite(DatabaseSync, trajDbPath);
+          const tables = db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('gen_metadata', 'executor_metadata')",
+            )
+            .all();
+          const tableNames = new Set(tables.map((t) => t.name));
+
+          if (tableNames.has('gen_metadata')) {
+            const genRow = db
+              .prepare('SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 1')
+              .get();
+            const genDetected = parseGenMetadataContextLimit(genRow?.data);
+            if (genDetected) return genDetected;
+          }
+
+          if (tableNames.has('executor_metadata')) {
+            const execRow = db
               .prepare('SELECT data FROM executor_metadata ORDER BY idx DESC LIMIT 1')
               .get();
-            const detected = parseExecutorMetadataContextLimit(row?.data);
-            if (detected) return detected;
+            const execDetected = parseExecutorMetadataContextLimit(execRow?.data);
+            if (execDetected) return execDetected;
           }
         } catch {
-          // Ignore unreadable DB and try fallback
+          // Ignore unreadable DB and try next candidate
         } finally {
           try {
             db?.close();
@@ -514,24 +562,28 @@ export function resolveHookContextLimit(transcriptPath, convId, options = {}) {
       }
     }
 
-    const cfgCandidates = [
-      path.join(appRoot, 'settings.json'),
-      path.join(path.dirname(appRoot), 'config', 'config.json'),
-    ];
-    for (const cfgPath of cfgCandidates) {
-      if (!isExistingFile(cfgPath)) continue;
-      try {
-        const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-        const lim = parseContextLimitValue(
-          parsed?.contextWindow ??
-            parsed?.context_window ??
-            parsed?.contextLimit ??
-            parsed?.userSettings?.contextWindow ??
-            parsed?.userSettings?.context_window,
-        );
-        if (lim) return lim;
-      } catch {
-        // Ignore malformed config
+    const cfgSeen = new Set();
+    for (const appRoot of appRoots) {
+      for (const cfgPath of [
+        path.join(appRoot, 'settings.json'),
+        path.join(path.dirname(appRoot), 'config', 'config.json'),
+      ]) {
+        const normCfg = path.resolve(cfgPath);
+        if (cfgSeen.has(normCfg) || !isExistingFile(normCfg)) continue;
+        cfgSeen.add(normCfg);
+        try {
+          const parsed = JSON.parse(fs.readFileSync(normCfg, 'utf8'));
+          const lim = parseContextLimitValue(
+            parsed?.contextWindow ??
+              parsed?.context_window ??
+              parsed?.contextLimit ??
+              parsed?.userSettings?.contextWindow ??
+              parsed?.userSettings?.context_window,
+          );
+          if (lim) return lim;
+        } catch {
+          // Ignore malformed config
+        }
       }
     }
   }
@@ -539,9 +591,9 @@ export function resolveHookContextLimit(transcriptPath, convId, options = {}) {
   return CONTEXT_LIMIT;
 }
 
-function isChildConversationInSummariesDb(transcriptPath, convId) {
+function isChildConversationInSummariesDb(transcriptPath, convId, options = {}, payload = null) {
   try {
-    const dbPath = resolveSiblingSummariesDbPath(transcriptPath, convId);
+    const dbPath = resolveSiblingSummariesDbPath(transcriptPath, convId, options, payload);
     if (!dbPath || !convId) return false;
     const sqliteMod = process.getBuiltinModule?.('node:sqlite');
     const DatabaseSync = sqliteMod?.DatabaseSync;
@@ -586,7 +638,7 @@ function isChildConversationInSummariesDb(transcriptPath, convId) {
  * Returns true if the current invocation belongs to a subagent/worker conversation
  * or a reactive `<SYSTEM_MESSAGE>` wakeup turn where chat compaction alerts must be skipped.
  */
-export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot) {
+export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot, options = {}) {
   if (
     Boolean(
       payload?.parentConversationId ||
@@ -622,7 +674,7 @@ export function isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapsh
     return true;
   }
 
-  if (transcriptPath && convId && isChildConversationInSummariesDb(transcriptPath, convId)) {
+  if (transcriptPath && convId && isChildConversationInSummariesDb(transcriptPath, convId, options, payload)) {
     return true;
   }
 
@@ -756,14 +808,14 @@ export function runHook(rawStdin, options = {}) {
     }
 
     const snapshot = inspectTranscriptTail(transcriptPath, options);
-    const activeLimit = resolveHookContextLimit(transcriptPath, convId, options);
+    const activeLimit = resolveHookContextLimit(transcriptPath, convId, options, payload);
     const threshold80 = Math.round(activeLimit * 0.8);
     const threshold92 = Math.round(activeLimit * 0.92);
     const skipAlert =
       enableChatAlert &&
       snapshot.hasPlannerInCycle &&
       snapshot.usedTokens >= threshold80 &&
-      isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot);
+      isSubagentOrSystemWakeup(payload, convId, transcriptPath, snapshot, options);
 
     let alertLevelToEmit = 0;
 

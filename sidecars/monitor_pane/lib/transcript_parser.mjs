@@ -417,11 +417,20 @@ function parseMapStringEntry(entryBuf) {
   return { key, val };
 }
 
+function openReadOnlySqliteDb(DatabaseSync, dbPath) {
+  try {
+    return new DatabaseSync(dbPath, { open: true, readOnly: true, timeout: 1500 });
+  } catch {
+    return new DatabaseSync(dbPath, { open: true, readOnly: true });
+  }
+}
+
 function parseGeneratorMetadataMessage(genBuf) {
   let pos = 0;
   let backendModel = '';
   let modelEnum = '';
   let displayModel = '';
+  let contextLimit = null;
   while (pos < genBuf.length) {
     const tag = readProtoVarint(genBuf, pos);
     if (!tag) break;
@@ -435,7 +444,13 @@ function parseGeneratorMetadataMessage(genBuf) {
       if (end > genBuf.length) break;
       const sub = genBuf.subarray(lenRes.nextPos, end);
       pos = end;
-      if (fieldNo === 19) {
+      if (fieldNo === 9) {
+        const f10 = findProtoSubfield(sub, 10, 2);
+        const lim = f10 ? findProtoSubfield(f10, 4, 0) : null;
+        if (typeof lim === 'number' && Number.isFinite(lim) && lim >= 16_000 && lim <= 10_000_000) {
+          contextLimit = Math.round(lim);
+        }
+      } else if (fieldNo === 19) {
         backendModel = sub.toString('utf8').trim();
       } else if (fieldNo === 20) {
         const entry = parseMapStringEntry(sub);
@@ -457,12 +472,12 @@ function parseGeneratorMetadataMessage(genBuf) {
       break;
     }
   }
-  return { backendModel, modelEnum, displayModel };
+  return { backendModel, modelEnum, displayModel, contextLimit };
 }
 
 /**
  * Decodes an AGY `conversations/<convId>.db` `gen_metadata.data` protobuf blob into
- * `{ stepIndices, backendModel, modelEnum, displayModel, modelName }`.
+ * `{ stepIndices, backendModel, modelEnum, displayModel, modelName, contextLimit }`.
  *
  * @param {Buffer | Uint8Array} rawBuf
  * @returns {{
@@ -470,7 +485,8 @@ function parseGeneratorMetadataMessage(genBuf) {
  *   backendModel: string,
  *   modelEnum: string,
  *   displayModel: string,
- *   modelName: string
+ *   modelName: string,
+ *   contextLimit: number | null
  * }}
  */
 export function parseGenMetadataProtobuf(rawBuf) {
@@ -481,6 +497,7 @@ export function parseGenMetadataProtobuf(rawBuf) {
       modelEnum: '',
       displayModel: '',
       modelName: '',
+      contextLimit: null,
     };
   }
   const buf = Buffer.isBuffer(rawBuf) ? rawBuf : Buffer.from(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
@@ -489,6 +506,7 @@ export function parseGenMetadataProtobuf(rawBuf) {
   let backendModel = '';
   let modelEnum = '';
   let displayModel = '';
+  let contextLimit = null;
 
   while (pos < buf.length) {
     const tag = readProtoVarint(buf, pos);
@@ -510,6 +528,7 @@ export function parseGenMetadataProtobuf(rawBuf) {
         if (meta.backendModel) backendModel = meta.backendModel;
         if (meta.modelEnum) modelEnum = meta.modelEnum;
         if (meta.displayModel) displayModel = meta.displayModel;
+        if (meta.contextLimit) contextLimit = meta.contextLimit;
       } else if (fieldNo === 2) {
         let pPos = 0;
         while (pPos < sub.length) {
@@ -549,6 +568,7 @@ export function parseGenMetadataProtobuf(rawBuf) {
     modelEnum,
     displayModel,
     modelName,
+    contextLimit,
   };
 }
 
@@ -613,8 +633,37 @@ export function parseExecutorMetadataContextLimit(rawBuf) {
   return null;
 }
 
+/**
+ * Decodes the active conversation context window limit from an AGY `conversations/<convId>.db`
+ * `gen_metadata.data` protobuf blob (field path `1 -> 9 -> 10 -> 4`).
+ * Unlike `executor_metadata` (which is only persisted when a turn finishes on `Stop`),
+ * `gen_metadata` is written after every single LLM step starting at `idx = 0`.
+ *
+ * @param {Buffer | Uint8Array | null | undefined} rawBuf
+ * @returns {number | null}
+ */
+export function parseGenMetadataContextLimit(rawBuf) {
+  if (!rawBuf || !(rawBuf instanceof Uint8Array) || rawBuf.length === 0) {
+    return null;
+  }
+  const buf = Buffer.isBuffer(rawBuf)
+    ? rawBuf
+    : Buffer.from(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+  const f1 = findProtoSubfield(buf, 1, 2);
+  if (!f1) return null;
+  const f9 = findProtoSubfield(f1, 9, 2);
+  if (!f9) return null;
+  const f10 = findProtoSubfield(f9, 10, 2);
+  if (!f10) return null;
+  const limit = findProtoSubfield(f10, 4, 0);
+  if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 16_000 && limit <= 10_000_000) {
+    return Math.round(limit);
+  }
+  return null;
+}
+
 const BRAIN_TRANSCRIPT_PATH_REGEX =
-  /[\\/]brain[\\/]([^\\/]+)[\\/](?:\.system_generated[\\/]logs[\\/])?transcript\.jsonl$/i;
+  /[\\/]brain[\\/]([^\\/]+)[\\/](?:\.system_generated[\\/]logs[\\/])?transcript(?:_full)?\.jsonl$/i;
 
 function inferTrajectoryDbPathFromTranscript(transcriptPath) {
   if (typeof transcriptPath !== 'string' || !transcriptPath) return null;
@@ -716,7 +765,7 @@ export function readTrajectoryDbModels(dbPath, prevDbState = null, preDbStat = n
 
   let db = null;
   try {
-    db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    db = openReadOnlySqliteDb(DatabaseSync, dbPath);
     let hasGenTable = canAppend;
     if (!canAppend) {
       const tables = db
@@ -775,6 +824,9 @@ export function readTrajectoryDbModels(dbPath, prevDbState = null, preDbStat = n
       }
       if (!row.data) continue;
       const decoded = parseGenMetadataProtobuf(row.data);
+      if (decoded.contextLimit) {
+        contextLimit = decoded.contextLimit;
+      }
       if (!decoded.modelName) continue;
       if (!firstModel) firstModel = decoded.modelName;
       latestModel = decoded.modelName;
